@@ -4,11 +4,11 @@
 Extension 实现 GEMM、FlashAttention、Softmax、LayerNorm、RMSNorm，并保留从
 正确性基线、逐版本优化、Nsight Compute 定位到稳定调度接口的完整证据链。
 
-`v0.1.0` 是首个可复现基线；当前 `main` 已继续加入 FlashAttention v8/v9。
-基线数据和原始样本见
-[`final_benchmark_sm86.md`](torch_ext/benchmark_results/final_benchmark_sm86.md)、
-[`JSON`](torch_ext/benchmark_results/final_benchmark_sm86.json) 与
-[`CSV`](torch_ext/benchmark_results/final_benchmark_sm86.csv)。
+`v0.1.0` 是首个可复现基线；`v0.2.0` 加入 FlashAttention v8/v9。当前正式
+数据和每轮原始样本见
+[`final_benchmark_sm86_v0_2_0.md`](torch_ext/benchmark_results/final_benchmark_sm86_v0_2_0.md)、
+[`JSON`](torch_ext/benchmark_results/final_benchmark_sm86_v0_2_0.json) 与
+[`CSV`](torch_ext/benchmark_results/final_benchmark_sm86_v0_2_0.csv)。
 
 ## 项目亮点
 
@@ -18,36 +18,34 @@ Extension 实现 GEMM、FlashAttention、Softmax、LayerNorm、RMSNorm，并保�
   `4096³` 相对 v4 加速 **2.45x**，达到 **13.05 TFLOP/s**。
 - FlashAttention v8 将 GEMM 中验证过的 `cp.async + ldmatrix + padded layout`
   数据通路迁移到 Q/K/V，NCU 显示普通 shared load 与对应 bank conflict 均降为
-  **0**；测试的 9 个 D64 MHA shape/mode 达到 PyTorch SDPA 的
-  **82.5%–99.2%**，简单平均约 **91%**。
+  **0**；正式测试的 8 个 D64 MHA shape/mode 达到 PyTorch SDPA 的
+  **77.7%–98.7%**，简单平均约 **88.4%**，相对 v7 加速 **2.36x–3.84x**。
 - 提供 shape-aware `auto` dispatch、tail/非对齐 fallback、current-stream
   执行、完整正确性回归，以及可复现的 CUDA Event benchmark。
 
 ## 当前性能摘要
 
 测试环境：RTX 3060 Laptop 6 GB（Ampere / sm_86）、WSL2 Ubuntu、CUDA 12.4、
-PyTorch 2.6.0+cu124。归一化与 GEMM 数字来自 v0.1.0 正式报告；FlashAttention
-D64 数字来自加入 v8 后的 2026-09-14 阶段复测。
+PyTorch 2.6.0+cu124。下表全部来自同一次 v0.2.0 正式测试。
 
 | 场景 | 手写实现 | 公平基线 | 结果 |
 |---|---:|---:|---:|
-| RMSNorm FP32 `[1024,1024]` | 0.0310 ms | PyTorch 0.1116 ms | **3.59x** |
-| LayerNorm FP32 `[1024,1024]` | 0.0298 ms | PyTorch 0.0334 ms | **1.12x** |
-| Softmax FP32 `[1024,1024]` | 0.0305 ms | PyTorch 0.0290 ms | 0.95x |
-| GEMM `1024³` | auto 0.1191 ms / 18.04 TFLOP/s | v4 0.4340 ms | **3.65x** |
-| GEMM `4096³` | auto 10.5286 ms / 13.05 TFLOP/s | v4 25.8464 ms | **2.45x** |
-| FA D64 `[2,8,1024,64]` full | auto(v8) 0.2411 ms | SDPA 0.2259 ms | **SDPA 的 93.7%** |
-| FA D64 `[2,8,1024,64]` causal | auto(v8) 0.1642 ms | SDPA 0.1481 ms | **SDPA 的 90.2%** |
-| FA D64 `[2,8,2048,64]` causal | auto(v8) 0.5323 ms | SDPA 0.5278 ms | **SDPA 的 99.2%** |
-| FA D64 `[2,8,4096,64]` full | auto(v8) 3.9120 ms | SDPA 3.2273 ms | **SDPA 的 82.5%** |
+| RMSNorm FP32 `[1024,1024]` | 0.0313 ms | PyTorch 0.1144 ms | **3.66x** |
+| LayerNorm FP32 `[1024,1024]` | 0.0297 ms | PyTorch 0.0332 ms | **1.12x** |
+| Softmax FP32 `[1024,1024]` | 0.0304 ms | PyTorch 0.0288 ms | 0.95x |
+| GEMM `1024³` | auto 0.1213 ms / 17.70 TFLOP/s | v4 0.4876 ms | **4.02x** |
+| GEMM `4096³` | auto 11.3822 ms / 12.07 TFLOP/s | v4 28.1105 ms | **2.47x** |
+| FA D64 `[2,8,1024,64]` causal | auto(v8) 0.1565 ms | SDPA 0.1544 ms | **SDPA 的 98.7%** |
+| FA D64 `[2,8,2048,64]` causal | auto(v8) 0.6466 ms | SDPA 0.6065 ms | **SDPA 的 93.8%** |
+| FA D64 `[2,8,4096,64]` full | auto(v8) 4.3439 ms | SDPA 3.5890 ms | **SDPA 的 82.6%** |
 
 GEMM 与 cuBLAS 使用相同的 FP16 输入、FP32 累加和 FP32 输出语义；`1024³`
-达到该 cuBLAS 基线的 148.08%，`4096³` 为 63.77%。FlashAttention v8 在上述
+达到该 cuBLAS 基线的 146.00%，`4096³` 为 63.59%。FlashAttention v8 在上述
 支持范围内已接近 PyTorch SDPA，但这不代表完整工业功能覆盖；GQA/MQA、
 varlen、paged KV cache、decode、backward、dropout、FP8 和多 GPU 尚未实现。
 
-计时使用 CUDA Event、预热、交替或平衡执行顺序并取多轮中位数。v0.1.0 正式
-报告在 clean commit `1d2efa0` 上生成；当前 v8/v9 的受控对照分别由
+计时使用 CUDA Event、20 次预热、12 轮位置/前序平衡顺序并取中位数。v0.2.0
+报告在 clean commit `0b34e32` 上生成；v8/v9 的专项对照分别由
 [`bench_flashattention_v8.py`](torch_ext/bench_flashattention_v8.py) 和
 [`bench_flashattention_v9.py`](torch_ext/bench_flashattention_v9.py) 复现。
 
@@ -99,7 +97,7 @@ cd torch_ext
 torch_ext/csrc/              # PyTorch 绑定、稳定 dispatch 与生产 kernel
 torch_ext/test_all.py        # 正确性、边界、非对齐 storage、stream 测试
 torch_ext/bench_final.py     # 可复现的统一 benchmark 与报告生成
-torch_ext/benchmark_results/ # v0.1.0 正式结果和原始样本
+torch_ext/benchmark_results/ # v0.1.0/v0.2.0 正式结果和原始样本
 kernels/                     # 从 naive 到 Tensor Core 的独立教学版本
 docs/                        # 算子原理与可视化说明
 ```
@@ -215,7 +213,7 @@ Tensor Core/softmax 指令和有限的 active warp。v9 保留为独立实验入
 `flashattention_auto` 继续选择 v8，避免把边界收益不稳定的流水版本硬编码进
 默认路径。复现脚本为 [`bench_flashattention_v9.py`](torch_ext/bench_flashattention_v9.py)。
 
-**当前工业性能完成度（2026-09-14）**：
+**v0.2.0 工业基线性能完成度（2026-09-14）**：
 
 将当前 `flashattention_auto`（正常对齐的 D=64 输入走 v8）与同一 GPU、同一
 dtype/shape 下 PyTorch SDPA 的 CUDA FlashAttention backend 对比，并以 SDPA
@@ -224,17 +222,18 @@ Event、预热和交替多轮中位数。
 
 | Shape | 模式 | 当前实现 | SDPA | 性能完成度 |
 |---|---:|---:|---:|---:|
-| `[1,1,512,64]` | full | 0.0288 ms | 0.0269 ms | 93.7% |
-| `[2,8,1024,64]` | full | 0.2411 ms | 0.2259 ms | 93.7% |
-| `[2,8,1024,64]` | causal | 0.1642 ms | 0.1481 ms | 90.2% |
-| `[2,8,2048,64]` | full | 1.0052 ms | 0.8660 ms | 86.2% |
-| `[2,8,2048,64]` | causal | 0.5323 ms | 0.5278 ms | 99.2% |
-| `[2,8,4096,64]` | full | 3.9120 ms | 3.2273 ms | 82.5% |
-| `[2,8,4096,64]` | causal | 2.1466 ms | 1.8317 ms | 85.3% |
-| `[1,16,1024,64]` | full | 0.2435 ms | 0.2326 ms | 95.5% |
-| `[1,16,1024,64]` | causal | 0.1604 ms | 0.1496 ms | 93.3% |
+| `[2,8,512,64]` | full | 0.0733 ms | 0.0716 ms | 97.7% |
+| `[2,8,512,64]` | causal | 0.0563 ms | 0.0533 ms | 94.8% |
+| `[2,8,1024,64]` | full | 0.2946 ms | 0.2375 ms | 80.6% |
+| `[2,8,1024,64]` | causal | 0.1565 ms | 0.1544 ms | 98.7% |
+| `[2,8,2048,64]` | full | 1.1537 ms | 0.8965 ms | 77.7% |
+| `[2,8,2048,64]` | causal | 0.6466 ms | 0.6065 ms | 93.8% |
+| `[2,8,4096,64]` | full | 4.3439 ms | 3.5890 ms | 82.6% |
+| `[2,8,4096,64]` | causal | 2.5046 ms | 2.0413 ms | 81.5% |
 
-上述 9 个 shape/mode 的简单平均约为 **91%**，范围为 **82.5%～99.2%**。这
+上述 8 个 shape/mode 的简单平均约为 **88.4%**，范围为 **77.7%～98.7%**；
+同批测试中 v8 相对 v7 加速 **2.36x～3.84x**。完整数据、环境元信息与每轮原始
+样本见 [`v0.2.0 正式报告`](torch_ext/benchmark_results/final_benchmark_sm86_v0_2_0.md)。这
 是“当前已支持场景的性能完成度”，不等于完整工业产品完成度：目前手写路径
 主要覆盖 FP16、D=64/128、forward、full/causal 和连续 MHA 输入；GQA/MQA、
 varlen、paged KV cache、decode、backward、dropout、FP8 和多 GPU 仍需单独实现。

@@ -62,7 +62,7 @@ docs/
 
 ## 注意
 
-- 讲「原理」以源码注释和仓库 README 调优记录为准；v0.1.0 基线数字见
-  `torch_ext/benchmark_results/final_benchmark_sm86.md`，v8/v9 阶段数据见根
-  README 和 `torch_ext/README.md`，不要混用测试批次。
+- 讲「原理」以源码注释和仓库 README 调优记录为准；当前 v0.2.0 正式数字见
+  `torch_ext/benchmark_results/final_benchmark_sm86_v0_2_0.md`，v0.1.0 历史
+  基线见同目录 `final_benchmark_sm86.md`，不要混用测试批次。
 - 新建算子后，文档里的 GFLOPS / maxErr 等数字需要实测更新，别凭空写。

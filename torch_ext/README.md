@@ -102,22 +102,29 @@ ai_infra_ops.flashattention_auto(q, k, v, causal)  # 稳定入口：D64路由v8�
 FP32 累加和 FP32 输出语义。表中的 FlashAttention 是 v8/v9 加入前的 v5/v7
 基线，保留它是为了展示后续优化幅度。
 
-### 当前 FlashAttention v8
+### v0.2.0：FlashAttention v8/v9
 
 v8 保持 v7 的数学路径不变，只将 Q/K/V 数据通路替换为
 `16B cp.async → D+8 padded shared memory → ldmatrix`。在 RTX 3060 Laptop
-上，测试的 9 个 D64 MHA shape/mode 达到 PyTorch SDPA 的
-**82.5%–99.2%**，简单平均约 **91%**：
+上，正式测试的 8 个 `[2,8,N,64]` shape/mode 达到 PyTorch SDPA 的
+**77.7%–98.7%**，简单平均约 **88.4%**；同批次相对 v7 加速
+**2.36x–3.84x**：
 
 | Shape | 模式 | auto(v8) | PyTorch SDPA | 性能完成度 |
 |---|---|---:|---:|---:|
-| `[2,8,1024,64]` | full | 0.2411 ms | 0.2259 ms | **93.7%** |
-| `[2,8,1024,64]` | causal | 0.1642 ms | 0.1481 ms | **90.2%** |
-| `[2,8,2048,64]` | causal | 0.5323 ms | 0.5278 ms | **99.2%** |
-| `[2,8,4096,64]` | full | 3.9120 ms | 3.2273 ms | **82.5%** |
+| `[2,8,512,64]` | full | 0.0733 ms | 0.0716 ms | **97.7%** |
+| `[2,8,1024,64]` | causal | 0.1565 ms | 0.1544 ms | **98.7%** |
+| `[2,8,2048,64]` | causal | 0.6466 ms | 0.6065 ms | **93.8%** |
+| `[2,8,4096,64]` | full | 4.3439 ms | 3.5890 ms | **82.6%** |
 
-这里的“性能完成度”只表示 `SDPA latency / custom latency`，不表示完整工业
-功能完成度。当前手写路径仍未覆盖 GQA/MQA、varlen、paged KV cache、decode、
+完整正式结果见
+[`Markdown`](benchmark_results/final_benchmark_sm86_v0_2_0.md)、
+[`JSON`](benchmark_results/final_benchmark_sm86_v0_2_0.json) 和
+[`CSV`](benchmark_results/final_benchmark_sm86_v0_2_0.csv)；报告对应 clean
+commit `0b34e32`，使用 20 次预热、100 次迭代和 12 轮平衡顺序。
+
+这里的“性能完成度”只表示 `SDPA latency / custom latency`，不代表完整工业
+产品完成度。当前手写路径仍未覆盖 GQA/MQA、varlen、paged KV cache、decode、
 backward、dropout、FP8 和多 GPU。
 
 ## 专项优化记录
