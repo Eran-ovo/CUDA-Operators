@@ -234,7 +234,9 @@ def markdown_report(metadata: dict, rows: list[dict]) -> str:
         f"rounds={metadata['rounds']}; statistic=median. Large cubic cases reduce "
         "iterations proportionally; the exact count is recorded per row. Implementations use the same "
         "inputs and use position/predecessor-balanced orders. `baseline/impl > 1` means "
-        "the implementation is faster than its baseline.",
+        "the implementation is faster than its baseline. `cuBLAS performance` is "
+        "`cuBLAS latency / custom latency`; values above 100% mean the custom kernel "
+        "is faster for that shape.",
         "",
         "## Resume-facing summary",
         "",
@@ -259,8 +261,8 @@ def markdown_report(metadata: dict, rows: list[dict]) -> str:
         "",
         "### GEMM cubic",
         "",
-        "| Shape | v4 ms | auto ms | cuBLAS ms | auto TFLOP/s | v4/auto | auto/cuBLAS perf |",
-        "|---:|---:|---:|---:|---:|---:|---:|",
+        "| Shape | auto ms | cuBLAS ms | auto TFLOP/s | cuBLAS performance |",
+        "|---:|---:|---:|---:|---:|",
         ]
     )
 
@@ -269,13 +271,11 @@ def markdown_report(metadata: dict, rows: list[dict]) -> str:
         key=lambda value: int(value),
     )
     for case in cubic_cases:
-        v4 = find_row(rows, "gemm_cubic", case, "", "v4")
         auto = find_row(rows, "gemm_cubic", case, "", "auto")
         cublas = find_row(rows, "gemm_cubic", case, "", "cublas")
         lines.append(
-            f"| {auto['shape']} | {v4['median_ms']:.4f} | {auto['median_ms']:.4f} | "
+            f"| {auto['shape']} | {auto['median_ms']:.4f} | "
             f"{cublas['median_ms']:.4f} | {auto['tflops']:.2f} | "
-            f"{v4['median_ms'] / auto['median_ms']:.2f}x | "
             f"{cublas['median_ms'] / auto['median_ms']:.2%} |"
         )
 
@@ -284,7 +284,7 @@ def markdown_report(metadata: dict, rows: list[dict]) -> str:
             "",
             "### GEMM Transformer shapes",
             "",
-            "| Shape | Route | auto ms | cuBLAS ms | auto TFLOP/s | auto/cuBLAS perf |",
+            "| Shape | Route | auto ms | cuBLAS ms | auto TFLOP/s | cuBLAS performance |",
             "|---|---|---:|---:|---:|---:|",
         ]
     )

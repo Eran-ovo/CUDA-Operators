@@ -92,14 +92,15 @@ ai_infra_ops.flashattention_auto(q, k, v, causal)  # 稳定入口：D64路由v8�
 | RMSNorm FP32 `[1024,1024]` | 0.0310 ms | PyTorch 0.1116 ms | **3.59x** |
 | LayerNorm FP32 `[1024,1024]` | 0.0298 ms | PyTorch 0.0334 ms | **1.12x** |
 | Softmax FP32 `[1024,1024]` | 0.0305 ms | PyTorch 0.0290 ms | 0.95x |
-| GEMM `1024³` | auto 0.1191 ms / 18.04 TFLOP/s | v4 0.4340 ms | **3.65x** |
-| GEMM `4096³` | auto 10.5286 ms / 13.05 TFLOP/s | v4 25.8464 ms | **2.45x** |
+| GEMM `1024³` | auto 0.1191 ms / 18.04 TFLOP/s | cuBLAS 0.1763 ms | **cuBLAS 的 148.08%** |
+| GEMM `4096³` | auto 10.5286 ms / 13.05 TFLOP/s | cuBLAS 6.7137 ms | **cuBLAS 的 63.77%** |
 | FA D64 `[2,8,1024,64]` full | auto(v7) 0.6618 ms | v5 0.7489 ms | **1.13x** |
 | FA D64 `[2,8,2048,64]` full | auto(v7) 2.5258 ms | v5 2.8350 ms | **1.12x** |
 
 正式脚本使用 CUDA Event、20 次预热、12 轮位置/前序实现双重平衡顺序并取
-中位数，同时保存 MAD、极差和最大误差。GEMM 与 cuBLAS 使用相同的 FP16 输入、
-FP32 累加和 FP32 输出语义。表中的 FlashAttention 是 v8/v9 加入前的 v5/v7
+中位数，同时保存 MAD、极差和最大误差。GEMM 以 cuBLAS 为最终性能基线，
+两者使用相同的 FP16 输入、FP32 累加和 FP32 输出语义；v4 仅作为版本演进
+对照。表中的 FlashAttention 是 v8/v9 加入前的 v5/v7
 基线，保留它是为了展示后续优化幅度。
 
 ### v0.2.0：FlashAttention v8/v9

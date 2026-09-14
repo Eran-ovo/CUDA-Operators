@@ -13,7 +13,7 @@
 
 ## Method
 
-CUDA Event timing; warmup=20, base iters=100, rounds=12; statistic=median. Large cubic cases reduce iterations proportionally; the exact count is recorded per row. Implementations use the same inputs and use position/predecessor-balanced orders. `baseline/impl > 1` means the implementation is faster than its baseline.
+CUDA Event timing; warmup=20, base iters=100, rounds=12; statistic=median. Large cubic cases reduce iterations proportionally; the exact count is recorded per row. Implementations use the same inputs and use position/predecessor-balanced orders. `baseline/impl > 1` means the implementation is faster than its baseline. `cuBLAS performance` is `cuBLAS latency / custom latency`; values above 100% mean the custom kernel is faster for that shape.
 
 ## Resume-facing summary
 
@@ -27,15 +27,15 @@ CUDA Event timing; warmup=20, base iters=100, rounds=12; statistic=median. Large
 
 ### GEMM cubic
 
-| Shape | v4 ms | auto ms | cuBLAS ms | auto TFLOP/s | v4/auto | auto/cuBLAS perf |
-|---:|---:|---:|---:|---:|---:|---:|
-| [1024,1024] @ [1024,1024] | 0.4876 | 0.1213 | 0.1771 | 17.70 | 4.02x | 146.00% |
-| [2048,2048] @ [2048,2048] | 3.5668 | 1.3033 | 1.0082 | 13.18 | 2.74x | 77.36% |
-| [4096,4096] @ [4096,4096] | 28.1105 | 11.3822 | 7.2376 | 12.07 | 2.47x | 63.59% |
+| Shape | auto ms | cuBLAS ms | auto TFLOP/s | cuBLAS performance |
+|---:|---:|---:|---:|---:|
+| [1024,1024] @ [1024,1024] | 0.1213 | 0.1771 | 17.70 | 146.00% |
+| [2048,2048] @ [2048,2048] | 1.3033 | 1.0082 | 13.18 | 77.36% |
+| [4096,4096] @ [4096,4096] | 11.3822 | 7.2376 | 12.07 | 63.59% |
 
 ### GEMM Transformer shapes
 
-| Shape | Route | auto ms | cuBLAS ms | auto TFLOP/s | auto/cuBLAS perf |
+| Shape | Route | auto ms | cuBLAS ms | auto TFLOP/s | cuBLAS performance |
 |---|---|---:|---:|---:|---:|
 | [128,4096] @ [4096,4096] | v10 | 0.3851 | 0.3430 | 11.15 | 89.08% |
 | [256,4096] @ [4096,4096] | v10 | 0.7041 | 0.5868 | 12.20 | 83.34% |

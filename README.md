@@ -15,7 +15,8 @@ Extension 实现 GEMM、FlashAttention、Softmax、LayerNorm、RMSNorm，并保�
 - 手写 Tensor Core 数据通路：`cp.async`、`ldmatrix`、
   `mma.sync.m16n8k16`，FP16 输入、FP32 累加与输出。
 - 使用 Nsight Compute 将 GEMM 的 LDSM bank conflict 从 **5.03 亿降至 0**；
-  `4096³` 相对 v4 加速 **2.45x**，达到 **13.05 TFLOP/s**。
+  `4096³` 达到 **12.07 TFLOP/s**，为同数值语义 cuBLAS 的 **63.6%**，
+  同时相对初始 Tensor Core v4 加速 **2.47x**。
 - FlashAttention v8 将 GEMM 中验证过的 `cp.async + ldmatrix + padded layout`
   数据通路迁移到 Q/K/V，NCU 显示普通 shared load 与对应 bank conflict 均降为
   **0**；正式测试的 8 个 D64 MHA shape/mode 达到 PyTorch SDPA 的
@@ -33,14 +34,16 @@ PyTorch 2.6.0+cu124。下表全部来自同一次 v0.2.0 正式测试。
 | RMSNorm FP32 `[1024,1024]` | 0.0313 ms | PyTorch 0.1144 ms | **3.66x** |
 | LayerNorm FP32 `[1024,1024]` | 0.0297 ms | PyTorch 0.0332 ms | **1.12x** |
 | Softmax FP32 `[1024,1024]` | 0.0304 ms | PyTorch 0.0288 ms | 0.95x |
-| GEMM `1024³` | auto 0.1213 ms / 17.70 TFLOP/s | v4 0.4876 ms | **4.02x** |
-| GEMM `4096³` | auto 11.3822 ms / 12.07 TFLOP/s | v4 28.1105 ms | **2.47x** |
+| GEMM `1024³` | auto 0.1213 ms / 17.70 TFLOP/s | cuBLAS 0.1771 ms | **cuBLAS 的 146.0%** |
+| GEMM `4096³` | auto 11.3822 ms / 12.07 TFLOP/s | cuBLAS 7.2376 ms | **cuBLAS 的 63.6%** |
 | FA D64 `[2,8,1024,64]` causal | auto(v8) 0.1565 ms | SDPA 0.1544 ms | **SDPA 的 98.7%** |
 | FA D64 `[2,8,2048,64]` causal | auto(v8) 0.6466 ms | SDPA 0.6065 ms | **SDPA 的 93.8%** |
 | FA D64 `[2,8,4096,64]` full | auto(v8) 4.3439 ms | SDPA 3.5890 ms | **SDPA 的 82.6%** |
 
-GEMM 与 cuBLAS 使用相同的 FP16 输入、FP32 累加和 FP32 输出语义；`1024³`
-达到该 cuBLAS 基线的 146.00%，`4096³` 为 63.59%。FlashAttention v8 在上述
+GEMM 以 cuBLAS 为最终性能基线，两者使用相同的 FP16 输入、FP32 累加和 FP32
+输出语义；完成度按 `cuBLAS latency / custom latency` 计算。`1024³` 为
+146.00%，`4096³` 为 63.59%。v4 只用于展示版本优化幅度，不作为工业性能
+基线。FlashAttention v8 在上述
 支持范围内已接近 PyTorch SDPA，但这不代表完整工业功能覆盖；GQA/MQA、
 varlen、paged KV cache、decode、backward、dropout、FP8 和多 GPU 尚未实现。
 
