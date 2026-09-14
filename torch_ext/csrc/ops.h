@@ -20,4 +20,6 @@ torch::Tensor flashattention_fp16_forward(torch::Tensor q, torch::Tensor k, torc
 torch::Tensor flashattention_v5_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
 torch::Tensor flashattention_v6_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
 torch::Tensor flashattention_v7_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
+torch::Tensor flashattention_v8_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
+torch::Tensor flashattention_v9_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
 torch::Tensor flashattention_auto_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);

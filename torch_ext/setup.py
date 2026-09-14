@@ -21,7 +21,9 @@ setup(
                 "csrc/flashattention_v5_cuda.cu",   # FlashAttention v5（P fragment 寄存器直连）
                 "csrc/flashattention_v6_cuda.cu",   # FlashAttention v6（D=128 实验版）
                 "csrc/flashattention_v7_cuda.cu",   # FlashAttention v7（D=64 Q fragment 寄存器缓存）
-                "csrc/flashattention_dispatch.cpp", # 稳定入口：D64按N路由v5/v7，D128路由v6
+                "csrc/flashattention_v8_cuda.cu",   # FlashAttention v8（16B cp.async + ldmatrix 数据通路）
+                "csrc/flashattention_v9_cuda.cu",   # FlashAttention v9（K 单缓冲 + V 双缓冲流水）
+                "csrc/flashattention_dispatch.cpp", # 稳定入口：D64路由v8，D128路由v6
             ],
             libraries=["cublas"],
             extra_compile_args={"cxx": ["-O3"], "nvcc": ["-O3"]},

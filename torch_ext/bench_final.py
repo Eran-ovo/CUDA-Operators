@@ -308,8 +308,8 @@ def markdown_report(metadata: dict, rows: list[dict]) -> str:
             "",
             "### FlashAttention D=64",
             "",
-            "| Shape | Mode | Route | Comparison | Comparison ms | auto ms | SDPA ms | comparison/auto | auto/SDPA perf |",
-            "|---|---|---|---|---:|---:|---:|---:|---:|",
+            "| Shape | Mode | Route | v7 ms | auto(v8) ms | v9 ms | SDPA ms | v7/auto speedup | v8→v9 speedup | auto/SDPA perf |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     flash_keys = sorted(
@@ -322,15 +322,14 @@ def markdown_report(metadata: dict, rows: list[dict]) -> str:
     )
     for case, mode in flash_keys:
         auto = find_row(rows, "flash_d64", case, mode, "auto")
+        v7 = find_row(rows, "flash_d64", case, mode, "v7")
+        v9 = find_row(rows, "flash_d64", case, mode, "v9")
         sdpa = find_row(rows, "flash_d64", case, mode, "sdpa")
-        comparison_label = "v7" if int(case) < 1024 else "v5"
-        route = "v5" if int(case) < 1024 else "v7"
-        comparison = find_row(rows, "flash_d64", case, mode, comparison_label)
         lines.append(
-            f"| {auto['shape']} | {mode} | {route} | {comparison_label} | "
-            f"{comparison['median_ms']:.4f} | {auto['median_ms']:.4f} | "
-            f"{sdpa['median_ms']:.4f} | "
-            f"{comparison['median_ms'] / auto['median_ms']:.2f}x | "
+            f"| {auto['shape']} | {mode} | v8 | {v7['median_ms']:.4f} | "
+            f"{auto['median_ms']:.4f} | {v9['median_ms']:.4f} | "
+            f"{sdpa['median_ms']:.4f} | {v7['median_ms'] / auto['median_ms']:.2f}x | "
+            f"{auto['median_ms'] / v9['median_ms']:.2f}x | "
             f"{sdpa['median_ms'] / auto['median_ms']:.2%} |"
         )
 
@@ -598,7 +597,7 @@ def main() -> None:
         del a, b
         torch.cuda.empty_cache()
 
-    d64_lengths = [1024] if args.quick else [512, 1024, 2048]
+    d64_lengths = [1024] if args.quick else [512, 1024, 2048, 4096]
     for n in d64_lengths:
         batch, heads, dim = 2, 8, 64
         q = torch.randn(batch, heads, n, dim, device="cuda", dtype=torch.float16)
@@ -606,32 +605,39 @@ def main() -> None:
         v = torch.randn_like(q)
         for causal in (False, True):
             mode = "causal" if causal else "full"
-            # auto 在短序列路由 v5、长序列路由 v7。最终报告只加入另一个
-            # 版本作为对照，避免把 auto 与它调用的同一 kernel 重复计时。
-            comparison = (
-                (
-                    "v7",
-                    lambda c=causal, q=q, k=k, v=v: ai_infra_ops.flashattention_v7(
-                        q, k, v, c
-                    ),
-                )
-                if n < 1024
-                else (
-                    "v5",
-                    lambda c=causal, q=q, k=k, v=v: ai_infra_ops.flashattention_v5(
-                        q, k, v, c
-                    ),
-                )
-            )
+            # D=64 的稳定 auto 当前路由 v8。统一保留 v7（上一稳定版）、
+            # v9（部分 K/V software pipeline 实验版）和 SDPA（工业基线），
+            # 分别衡量本轮主优化收益、下一步实验收益和剩余性能差距。
             rows += benchmark_case(
                 suite="flash_d64",
                 case=str(n),
                 shape=f"[{batch},{heads},{n},{dim}]",
                 mode=mode,
                 implementations=[
-                    ("auto", lambda c=causal, q=q, k=k, v=v: ai_infra_ops.flashattention_auto(q, k, v, c)),
-                    comparison,
-                    ("sdpa", lambda c=causal, q=q, k=k, v=v: F.scaled_dot_product_attention(q, k, v, is_causal=c)),
+                    (
+                        "auto",
+                        lambda c=causal, q=q, k=k, v=v: ai_infra_ops.flashattention_auto(
+                            q, k, v, c
+                        ),
+                    ),
+                    (
+                        "v7",
+                        lambda c=causal, q=q, k=k, v=v: ai_infra_ops.flashattention_v7(
+                            q, k, v, c
+                        ),
+                    ),
+                    (
+                        "v9",
+                        lambda c=causal, q=q, k=k, v=v: ai_infra_ops.flashattention_v9(
+                            q, k, v, c
+                        ),
+                    ),
+                    (
+                        "sdpa",
+                        lambda c=causal, q=q, k=k, v=v: F.scaled_dot_product_attention(
+                            q, k, v, is_causal=c
+                        ),
+                    ),
                 ],
                 baseline="sdpa",
                 warmup=args.warmup,

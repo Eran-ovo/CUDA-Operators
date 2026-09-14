@@ -10,7 +10,7 @@ docs/
 ├── gemm.html             # GEMM：v0-v10、Tensor Core 数据通路与 auto dispatch
 ├── ldmatrix.html         # 交互专题：v7/v8 fragment 映射、LDSM bank conflict 与 padding
 ├── normalization.html    # 归约/归一化类：Softmax / LayerNorm / RMSNorm
-├── flashattention.html   # FlashAttention：v1-v7、D64/D128 与稳定 dispatch
+├── flashattention.html   # FlashAttention v1-v7 原理；v8/v9 详见 torch_ext/README
 ├── torch_ext.html        # PyTorch 封装：ai_infra_ops、包装层、绑定、校验与测试
 ├── assets/
 │   └── style.css         # 共享样式（所有分类页共用同一份）
@@ -23,8 +23,8 @@ docs/
 |----|---------|------|
 | GEMM | tiling 复用 + 访存优化 + Tensor Core | v0-v10 + shape-aware auto dispatch |
 | 归约/归一化 | 块内树形归约 + warp shuffle，fusion 一次写回 | softmax / layernorm / rmsnorm |
-| FlashAttention | 分块 + online softmax（S 不落 HBM） | v1-v7 + D64/D128 auto dispatch |
-| PyTorch 封装 | 手写 kernel → torch 算子（包装层 + 绑定 + 校验） | 18 个手写入口 + 1 个 cuBLAS 基线 |
+| FlashAttention | 分块 + online softmax（S 不落 HBM） | v1-v9 + D64/D128 auto dispatch |
+| PyTorch 封装 | 手写 kernel → torch 算子（包装层 + 绑定 + 校验） | 20 个手写入口 + 1 个 cuBLAS 基线 |
 
 ## 如何扩展
 
@@ -62,6 +62,7 @@ docs/
 
 ## 注意
 
-- 讲「原理」以源码注释和仓库 README 调优记录为准；简历性能数字只以
-  `torch_ext/benchmark_results/final_benchmark_sm86.md` 为准。
+- 讲「原理」以源码注释和仓库 README 调优记录为准；v0.1.0 基线数字见
+  `torch_ext/benchmark_results/final_benchmark_sm86.md`，v8/v9 阶段数据见根
+  README 和 `torch_ext/README.md`，不要混用测试批次。
 - 新建算子后，文档里的 GFLOPS / maxErr 等数字需要实测更新，别凭空写。

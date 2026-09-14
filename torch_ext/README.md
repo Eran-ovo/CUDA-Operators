@@ -1,6 +1,6 @@
 # torch_ext：把手写 CUDA kernel 封装成 PyTorch 算子
 
-把 `kernels/` 下 5 类手写 CUDA kernel（GEMM / Softmax / LayerNorm / RMSNorm / FlashAttention）统一封装成一个 PyTorch Extension 模块 `ai_infra_ops`。当前暴露 18 个手写算子/调度入口，以及 1 个只用于公平测速的 cuBLAS 基线入口。
+把 `kernels/` 下 5 类手写 CUDA kernel（GEMM / Softmax / LayerNorm / RMSNorm / FlashAttention）统一封装成一个 PyTorch Extension 模块 `ai_infra_ops`。当前暴露 20 个手写算子/调度入口，以及 1 个只用于公平测速的 cuBLAS 基线入口。
 
 ## 环境
 
@@ -74,10 +74,14 @@ ai_infra_ops.flashattention_fp16(q, k, v, causal)  # v4：fp16 Tensor Core，P �
 ai_infra_ops.flashattention_v5(q, k, v, causal)    # v5：[N,64] 或 [B,H,N,64]，P fragment 寄存器直连
 ai_infra_ops.flashattention_v6(q, k, v, causal)    # v6：[N,128] 或 [B,H,N,128]，D=128 实验版
 ai_infra_ops.flashattention_v7(q, k, v, causal)    # v7：D=64，Q fragment 寄存器缓存实验
-ai_infra_ops.flashattention_auto(q, k, v, causal)  # 稳定入口：D64按N路由v5/v7，D128路由v6
+ai_infra_ops.flashattention_v8(q, k, v, causal)    # v8：D=64，cp.async + ldmatrix 数据通路
+ai_infra_ops.flashattention_v9(q, k, v, causal)    # v9：D=64，K 单缓冲 + V 双缓冲实验
+ai_infra_ops.flashattention_auto(q, k, v, causal)  # 稳定入口：D64路由v8，D128路由v6
 ```
 
-## v0.1.0 正式结果（唯一简历口径）
+## 性能结果
+
+### v0.1.0 可复现基线
 
 正式报告：[`benchmark_results/final_benchmark_sm86.md`](benchmark_results/final_benchmark_sm86.md)。
 同目录的 [JSON](benchmark_results/final_benchmark_sm86.json) 保存环境和每轮原始
@@ -95,9 +99,26 @@ ai_infra_ops.flashattention_auto(q, k, v, causal)  # 稳定入口：D64按N路�
 
 正式脚本使用 CUDA Event、20 次预热、12 轮位置/前序实现双重平衡顺序并取
 中位数，同时保存 MAD、极差和最大误差。GEMM 与 cuBLAS 使用相同的 FP16 输入、
-FP32 累加和 FP32 输出语义。FlashAttention 当前只宣称相对自身基线的优化；
-其绝对性能仍为 PyTorch SDPA 的约 26%–34%。下文各专项表是不同阶段的受控
-实验记录，用来解释优化因果，不能与本节数字混为一次测试结果。
+FP32 累加和 FP32 输出语义。表中的 FlashAttention 是 v8/v9 加入前的 v5/v7
+基线，保留它是为了展示后续优化幅度。
+
+### 当前 FlashAttention v8
+
+v8 保持 v7 的数学路径不变，只将 Q/K/V 数据通路替换为
+`16B cp.async → D+8 padded shared memory → ldmatrix`。在 RTX 3060 Laptop
+上，测试的 9 个 D64 MHA shape/mode 达到 PyTorch SDPA 的
+**82.5%–99.2%**，简单平均约 **91%**：
+
+| Shape | 模式 | auto(v8) | PyTorch SDPA | 性能完成度 |
+|---|---|---:|---:|---:|
+| `[2,8,1024,64]` | full | 0.2411 ms | 0.2259 ms | **93.7%** |
+| `[2,8,1024,64]` | causal | 0.1642 ms | 0.1481 ms | **90.2%** |
+| `[2,8,2048,64]` | causal | 0.5323 ms | 0.5278 ms | **99.2%** |
+| `[2,8,4096,64]` | full | 3.9120 ms | 3.2273 ms | **82.5%** |
+
+这里的“性能完成度”只表示 `SDPA latency / custom latency`，不表示完整工业
+功能完成度。当前手写路径仍未覆盖 GQA/MQA、varlen、paged KV cache、decode、
+backward、dropout、FP8 和多 GPU。
 
 ## 专项优化记录
 
@@ -260,19 +281,20 @@ cd torch_ext
 [RMSNorm / Softmax / LayerNorm] PASS
 [GEMM v4-v10 / auto / cuBLAS baseline] PASS
 [GEMM edge / misaligned-storage fallback / deterministic mapping] PASS
-[FlashAttention v3-v7 / auto / D64 / D128 / full / causal] PASS
+[FlashAttention v3-v9 / auto / D64 / D128 / full / causal] PASS
+[FlashAttention v8 misaligned-storage fallback] PASS
 [FlashAttention tail / BHD addressing] PASS
 [All operators on non-default CUDA stream] PASS
 [PyTorch CUDA contract suite] PASS
 ```
 
-v4/v5/v7 测试使用 `N=129`，专门覆盖不是 64 倍数的 K/V 尾块，同时验证 full 和 causal 两种模式。三版输出为 fp16，reference 使用 fp16 输入、fp32 计算后再转回 fp16，误差阈值为 `2e-2`。v4/v5/v7 的结果逐项一致，说明后两版只改变数据搬运路径，没有改变数值语义。
+v4/v5/v7/v8/v9 测试使用 `N=129`，专门覆盖不是 64 倍数的 K/V 尾块，同时验证 full 和 causal 两种模式。五版输出为 fp16，reference 使用 fp16 输入、fp32 计算后再转回 fp16，误差阈值为 `2e-2`。五版结果逐项一致，说明后续版本只改变数据搬运与流水方式，没有改变数值语义。
 
 额外边界回归覆盖 `N={1,7,63,64,65,127,128,129,257}` 的 full/causal，结果为 `PASS maxErr=9.766e-04, v4-v5=0`。这些尺寸覆盖 64×64 tile 的边界前、边界上、边界后以及多个 KV tile。
 
 批量多头回归使用 `[B,H,N,D]=[2,3,65,64]`，full/causal 对拍 `torch.nn.functional.scaled_dot_product_attention`，最大误差不超过 `2.441e-04`。`N=65` 同时验证每个 head 的地址隔离和 K/V tail。
 
-### 批量多头：二维 CUDA grid
+### 批量多头：二维 CUDA grid（v7 阶段记录）
 
 v5 同时接受 `[N,64]` 和连续的 `[B,H,N,64]`。kernel 使用 `grid.x` 枚举 64 行 Q block，使用 `grid.y` 枚举展平后的 `batch×head`：
 
@@ -292,7 +314,7 @@ O += sequence_offset;
 | full | 0.6394 ms | 0.7227 ms | 0.6398 ms | 2.1435 ms | 0.2082 ms | **0.89x** |
 | causal | 0.4150 ms | 0.4552 ms | 0.4207 ms | 2.1429 ms | 0.1372 ms | **0.92x** |
 
-`auto` 在 N=1024 时路由到 v7，两者约 1% 的差异属于笔记本频率噪声；二维
+当时的 `auto` 在 N=1024 时路由到 v7，两者约 1% 的差异属于笔记本频率噪声；二维
 grid 消除了 16 次 Python/C++/CUDA launch 的串行提交开销，并把全部 head 的
 Q block 一次性暴露给 GPU 调度器。v7 在该 shape 上相对 v5 提速约
 1.13x/1.08x，但仍明显慢于工业级 SDPA。可用
@@ -333,6 +355,52 @@ occupancy 提升。下一步若继续优化 causal，应研究对角线 KV tile 
 的预期。causal 平均只遍历约一半 KV tiles，因此收益小于 full。随后固定
 `N=1024` 扫描 `B*H={1,4,16,64}`，v7 在 full/causal 均保持正收益，因此生产
 策略采用 `D64 && N>=1024 -> v7`。
+
+### v8：`cp.async + ldmatrix` 数据通路
+
+v8 保持 v7 的 Q fragment 缓存、online softmax、QK/PV MMA 次序和输出精度
+不变，只替换 Q/K/V 的搬运路径：
+
+```text
+v7: scalar global load -> [D+1] shared -> scalar fragment load
+v8: 16B cp.async -> [D+8] shared -> ldmatrix fragment load
+```
+
+`D+1=65` 的 shared-memory 行跨度为 130B，无法保证每行满足 16B 对齐。v8
+改用 `D+8=72` half，即 144B 行跨度：它既满足 16B `cp.async` 对齐，又让
+`ldmatrix` 访问的相邻 8 行依次错开 4 个 bank。尾行使用 `cp.async` 的
+`src_size=0` zero-fill，不读取越界 global memory；三个真实输入指针任一未
+对齐时，wrapper 按序列长度安全回退到 v5/v7。
+
+在 `[2,8,N,64]`、N=64–4096 的交替顺序多轮中位数复测中，v8 相对 v7
+加速 **1.40x–3.07x**，N=4096 full/causal 分别为 **2.39x/2.45x**，并保持
+逐元素一致。NCU 在 `[2,8,1024,64]` full 上显示普通 shared load 从
+4,227,072 条降为 0，对应约 20,138,428 次 bank conflict 也降为 0；代价是
+registers/thread 127→135、static shared memory 16.64→18.43 KB、实测
+occupancy 28.61%→23.10%。结果说明这一步的收益来自缩短数据通路，而不是
+提高 occupancy。复现命令：
+
+```bash
+python bench_flashattention_v8.py --n 64 128 256 512 1024 2048 4096 \
+  --warmup 30 --iters 50 --rounds 10
+```
+
+### v9：部分 K/V 双缓冲实验
+
+QK 阶段结束后，当前 K tile 已不再使用，可以由下一 tile 覆盖；当前 V tile
+仍需服务 PV，因此 v9 让 K 保持单 buffer、V 使用双 buffer，并在当前 PV MMA
+期间预取下一 tile 的 K/V。shared memory 从 18.43 KB 增至 27.65 KB，
+registers/thread 从 135 增至 139。
+
+同一受控测试中，N=1024/2048/4096 的收益约 **1%–7%**，但 N=128 回退约
+**2%–6%**。这证明部分搬运可以被隐藏，也说明额外 stage 的收益依赖序列长度
+和计算窗口。v9 因此只保留为实验入口；稳定 `flashattention_auto` 的正常对齐
+D64 路径继续选择跨 shape 更稳定的 v8。
+
+```bash
+python bench_flashattention_v9.py --n 64 128 256 512 1024 2048 4096 \
+  --warmup 30 --iters 50 --rounds 10
+```
 
 ### v6：D=128 扩展实验
 
@@ -447,7 +515,7 @@ v4 的路径是 `S(fp32 registers) → fp16 Ps(smem) → half2 A registers → M
 ```
 torch_ext/
 ├── csrc/
-│   ├── bindings.cpp           # PyBind11 绑定：18 个手写算子/调度入口 + cuBLAS 基线
+│   ├── bindings.cpp           # PyBind11 绑定：20 个手写算子/调度入口 + cuBLAS 基线
 │   ├── ops.h                  # 入口函数声明
 │   ├── rmsnorm_cuda.cu        # 各算子：CUDA kernel + torch::Tensor 包装
 │   ├── softmax_cuda.cu
@@ -461,7 +529,9 @@ torch_ext/
 │   ├── flashattention_v5_cuda.cu   # FlashAttention v5，P fragment 寄存器直连
 │   ├── flashattention_v6_cuda.cu   # FlashAttention v6，D=128 实验版
 │   ├── flashattention_v7_cuda.cu   # FlashAttention v7，Q fragment 寄存器缓存
-│   └── flashattention_dispatch.cpp # 稳定入口：D64路由v5/v7，D128路由v6
+│   ├── flashattention_v8_cuda.cu   # FlashAttention v8，cp.async + ldmatrix
+│   ├── flashattention_v9_cuda.cu   # FlashAttention v9，部分 K/V 双缓冲
+│   └── flashattention_dispatch.cpp # 稳定入口：D64路由v8，D128路由v6
 ├── setup.py                   # CUDAExtension 单模块构建
 ├── build_and_test.sh          # 环境预检 + Ninja 增量编译 + 完整正确性测试
 ├── test_all.py                # 全量正确性、边界与 CUDA stream 契约测试
@@ -476,7 +546,9 @@ torch_ext/
 ├── bench_flashattention_d128.py # v6 D=128 vs PyTorch SDPA
 ├── bench_flashattention_v7.py # 固定 B/H/D，扫描 N 对比 v5/v7
 ├── bench_flashattention_v7_bh.py # 固定 N/D，扫描 B×H 并行度
-└── profile_flashattention_v5.py # 单次暖机 launch，供 NCU 对比 v5/v7
+├── bench_flashattention_v8.py # v7/v8 数据通路受控对照
+├── bench_flashattention_v9.py # v8/v9 部分流水受控对照
+└── profile_flashattention_v5.py # 单次暖机 launch，供 NCU 对比 v5/v7/v8/v9
 ```
 
 ## 关键点（面试常问）

@@ -1,4 +1,4 @@
-"""Launch one warmed-up FlashAttention v5/v7 kernel for Nsight Compute.
+"""Launch one warmed-up FlashAttention v5/v7/v8/v9 kernel for Nsight Compute.
 
 Example:
     ncu --profile-from-start off \
@@ -25,7 +25,7 @@ parser.add_argument("--heads", type=int, default=8)
 parser.add_argument("--n", type=int, default=1024)
 parser.add_argument("--causal", action="store_true")
 parser.add_argument("--warmup", type=int, default=10)
-parser.add_argument("--version", type=int, choices=(5, 7), default=5)
+parser.add_argument("--version", type=int, choices=(5, 7, 8, 9), default=5)
 args = parser.parse_args()
 
 torch.manual_seed(42)
@@ -40,11 +40,13 @@ q = torch.randn(
 k = torch.randn_like(q)
 v = torch.randn_like(q)
 
-# v5/v7 具有完全相同的输入和数学语义，用同一脚本可以减少 profile 配置
+# v5/v7/v8/v9 具有完全相同的输入和数学语义，用同一脚本可以减少 profile 配置
 # 不一致造成的伪差异。
 op = {
     5: ai_infra_ops.flashattention_v5,
     7: ai_infra_ops.flashattention_v7,
+    8: ai_infra_ops.flashattention_v8,
+    9: ai_infra_ops.flashattention_v9,
 }[args.version]
 
 # 预热发生在 cudaProfilerStart() 之前。这样既让 CUDA context、PyTorch

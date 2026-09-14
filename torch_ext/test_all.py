@@ -202,12 +202,14 @@ check("FlashAttention v5 full", out.float(), torch_attn_fp16(False).float(), 2e-
 out = ai_infra_ops.flashattention_v5(q16, k16, v16, True)
 check("FlashAttention v5 causal", out.float(), torch_attn_fp16(True).float(), 2e-2)
 
-# ---------------- FlashAttention v4/v5/v7 边界回归 ----------------
+# ---------------- FlashAttention v4/v5/v7/v8 边界回归 ----------------
 # 同时覆盖 Bq/Bc=64 的边界前、边界上、边界后以及多个 KV tile。
 edge_sizes = (1, 7, 63, 64, 65, 127, 128, 129, 257)
 max_edge_err = 0.0
 max_v4_v5_diff = 0.0
 max_v5_v7_diff = 0.0
+max_v7_v8_diff = 0.0
+max_v8_v9_diff = 0.0
 for n in edge_sizes:
     qe = torch.randn(n, 64, device=device, dtype=torch.float16)
     ke = torch.randn(n, 64, device=device, dtype=torch.float16)
@@ -224,11 +226,15 @@ for n in edge_sizes:
         out4 = ai_infra_ops.flashattention_fp16(qe, ke, ve, causal)
         out5 = ai_infra_ops.flashattention_v5(qe, ke, ve, causal)
         out7 = ai_infra_ops.flashattention_v7(qe, ke, ve, causal)
+        out8 = ai_infra_ops.flashattention_v8(qe, ke, ve, causal)
+        out9 = ai_infra_ops.flashattention_v9(qe, ke, ve, causal)
         max_edge_err = max(
             max_edge_err,
             (out4.float() - ref.float()).abs().max().item(),
             (out5.float() - ref.float()).abs().max().item(),
             (out7.float() - ref.float()).abs().max().item(),
+            (out8.float() - ref.float()).abs().max().item(),
+            (out9.float() - ref.float()).abs().max().item(),
         )
         max_v4_v5_diff = max(
             max_v4_v5_diff,
@@ -238,19 +244,52 @@ for n in edge_sizes:
             max_v5_v7_diff,
             (out5.float() - out7.float()).abs().max().item(),
         )
+        max_v7_v8_diff = max(
+            max_v7_v8_diff,
+            (out7.float() - out8.float()).abs().max().item(),
+        )
+        max_v8_v9_diff = max(
+            max_v8_v9_diff,
+            (out8.float() - out9.float()).abs().max().item(),
+        )
 
 edge_ok = (
     max_edge_err < 2e-2
     and max_v4_v5_diff == 0.0
     and max_v5_v7_diff == 0.0
+    and max_v7_v8_diff == 0.0
+    and max_v8_v9_diff == 0.0
 )
 print(
-    f"[FlashAttention v4/v5/v7 edge suite] {'PASS' if edge_ok else 'FAIL'}  "
+    f"[FlashAttention v4/v5/v7/v8/v9 edge suite] {'PASS' if edge_ok else 'FAIL'}  "
     f"maxErr={max_edge_err:.3e}  v4-v5={max_v4_v5_diff:.3e}  "
-    f"v5-v7={max_v5_v7_diff:.3e}"
+    f"v5-v7={max_v5_v7_diff:.3e}  v7-v8={max_v7_v8_diff:.3e}  "
+    f"v8-v9={max_v8_v9_diff:.3e}"
 )
 if not edge_ok:
-    raise AssertionError("FlashAttention v4/v5/v7 edge regression failed")
+    raise AssertionError("FlashAttention v4/v5/v7/v8 edge regression failed")
+
+# v8 使用 16B cp.async，因此 contiguous 但起点未对齐的短序列 view 必须走 v5
+# fallback。这里显式构造 storage_offset=1 的 Q/K/V，防止只检查 contiguous
+# 而漏掉真实指针对齐条件。
+misaligned_n = 65
+misaligned_tensors = []
+for _ in range(3):
+    storage = torch.randn(
+        misaligned_n * 64 + 1, device=device, dtype=torch.float16
+    )
+    tensor = storage[1:].view(misaligned_n, 64)
+    assert tensor.is_contiguous() and tensor.data_ptr() % 16 != 0
+    misaligned_tensors.append(tensor)
+mis_q, mis_k, mis_v = misaligned_tensors
+for causal in (False, True):
+    torch.testing.assert_close(
+        ai_infra_ops.flashattention_v8(mis_q, mis_k, mis_v, causal),
+        ai_infra_ops.flashattention_v5(mis_q, mis_k, mis_v, causal),
+        rtol=0,
+        atol=0,
+    )
+print("[FlashAttention v8 misaligned-storage fallback] PASS")
 
 # ---------------- FlashAttention v5 批量多头 [B,H,N,D] ----------------
 # N=65 同时覆盖多头寻址隔离和每个 head 内的 K/V tail。
@@ -361,6 +400,13 @@ with torch.cuda.stream(test_stream):
     flash_out = ai_infra_ops.flashattention(sq, sk, sv, False)
     flash_ref = torch.softmax((sq @ sk.T) * (64 ** -0.5), dim=-1) @ sv
 
+    # v8 的 cp.async、wait_group 和 ldmatrix 也必须全部排在当前 stream。
+    sq16, sk16, sv16 = sq.half(), sk.half(), sv.half()
+    flash_v8_out = ai_infra_ops.flashattention_v8(sq16, sk16, sv16, False)
+    flash_v8_ref = ai_infra_ops.flashattention_v7(sq16, sk16, sv16, False)
+    flash_v9_out = ai_infra_ops.flashattention_v9(sq16, sk16, sv16, False)
+    flash_v9_ref = ai_infra_ops.flashattention_v8(sq16, sk16, sv16, False)
+
 test_stream.synchronize()
 check("RMSNorm non-default stream", rms_out, rms_ref, 1e-4)
 check("Softmax non-default stream", softmax_out, softmax_ref, 1e-4)
@@ -384,6 +430,18 @@ check("GEMM MMA v10 BK32 non-default stream", gemm_v10_out, gemm_v10_ref, 2e-2)
 check("GEMM MMA auto non-default stream", gemm_auto_out, gemm_v10_ref, 2e-2)
 check("cuBLAS baseline non-default stream", gemm_cublas_out, gemm_mma_ref, 2e-2)
 check("FlashAttention v3 non-default stream", flash_out, flash_ref, 1e-2)
+check(
+    "FlashAttention v8 non-default stream",
+    flash_v8_out.float(),
+    flash_v8_ref.float(),
+    1e-7,
+)
+check(
+    "FlashAttention v9 non-default stream",
+    flash_v9_out.float(),
+    flash_v9_ref.float(),
+    1e-7,
+)
 
 # 空 batch 可以直接返回空输出；K=0 的 GEMM 按数学语义返回全零。
 empty_x = torch.empty(0, 17, device=device)
