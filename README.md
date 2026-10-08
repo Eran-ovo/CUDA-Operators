@@ -1,4 +1,4 @@
-# AI Infra CUDA Operators
+#CUDA Operators
 
 面向 AI Infra 岗位的 CUDA 算子库：使用 CUDA C++、inline PTX 和 PyTorch
 Extension 实现 GEMM、FlashAttention、Softmax、LayerNorm、RMSNorm，并保留从
