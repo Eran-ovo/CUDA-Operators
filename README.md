@@ -13,6 +13,7 @@ Extension 实现 GEMM、FlashAttention、Softmax、LayerNorm、RMSNorm，并保�
 ## 项目亮点
 
 - 支持打包的 D=64 FP16 因果 GQA。输入按 token 排列，复用 v8 的 Tensor Core 数据通路，同一次 kernel launch 处理不同长度的请求，直接索引共享的 KV heads。使用方法见 [Packed GQA](torch_ext/README.md#packed-gqa)。
+- D=128 FP16 Attention 使用 32×32 tile、`cp.async` 和 `ldmatrix`。在 RTX 3060 Laptop 的八组测试中相对 v6 提速 **1.76–3.53×**。 [D128 结果与复现](torch_ext/README.md#d128-tile-优化)
 
 - 手写 Tensor Core 数据通路：`cp.async`、`ldmatrix`、
   `mma.sync.m16n8k16`，FP16 输入、FP32 累加与输出。
@@ -75,8 +76,8 @@ y2 = ai_infra_ops.rmsnorm(x, weight, 1e-5)
 
 `gemm_mma_auto` 对小 token-batch 完整 tile 选择 BK32 v10，其他完整 tile 选择
 v8，tail 或非对齐 storage 回退 v4。`flashattention_auto` 对正常对齐的 D64
-选择 v8，对未对齐 storage 按旧策略回退 v5/v7，对 D128 选择 v6；不支持的
-维度明确报错。
+选择 v8，未对齐的 D64 storage 回退 v5/v7。D128 在 sm_80+ 的对齐输入上选择
+32×32 tile，其他 D128 输入回退 v6。
 
 ## 快速复现
 

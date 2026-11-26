@@ -73,10 +73,11 @@ ai_infra_ops.flashattention(q, k, v, causal)  # q/k/v [N,64] fp32
 ai_infra_ops.flashattention_fp16(q, k, v, causal)  # v4：fp16 Tensor Core，P 经 Ps 中转
 ai_infra_ops.flashattention_v5(q, k, v, causal)    # v5：[N,64] 或 [B,H,N,64]，P fragment 寄存器直连
 ai_infra_ops.flashattention_v6(q, k, v, causal)    # v6：[N,128] 或 [B,H,N,128]，D=128 实验版
+ai_infra_ops.flashattention_d128(q, k, v, causal)  # D128：32×32 tile，cp.async + ldmatrix
 ai_infra_ops.flashattention_v7(q, k, v, causal)    # v7：D=64，Q fragment 寄存器缓存实验
 ai_infra_ops.flashattention_v8(q, k, v, causal)    # v8：D=64，cp.async + ldmatrix 数据通路
 ai_infra_ops.flashattention_v9(q, k, v, causal)    # v9：D=64，K 单缓冲 + V 双缓冲实验
-ai_infra_ops.flashattention_auto(q, k, v, causal)  # 稳定入口：D64路由v8，D128路由v6
+ai_infra_ops.flashattention_auto(q, k, v, causal)  # D64 走 v8，D128 按架构和对齐分发
 ```
 
 ## 性能结果
@@ -414,7 +415,7 @@ python bench_flashattention_v9.py --n 64 128 256 512 1024 2048 4096 \
 
 v5 的 D=64 不是把宏改成 128 就结束。D 同时影响三条路径：QK 的归约步数从 `64/16=4` 变成 `128/16=8`；Q/K/V shared-memory 行宽从 65 变成 129；PV 的输出 tile 数从 `64/8=8` 变成 `128/8=16`，于是每个线程的 `o_acc` 也翻倍。v6 保留 register-P 重排，只扩展这些维度。
 
-正确性测试使用连续 `[B,H,N,D]=[2,2,65,128]`，full/causal 均与 SDPA 对齐。性能脚本为 [bench_flashattention_d128.py](bench_flashattention_d128.py)，同一输入、交错 5 轮中位数：
+正确性测试使用连续 `[B,H,N,D]=[2,2,65,128]`，full/causal 均与 SDPA 对齐。以下为 v6 的历史结果，同一输入交错 5 轮并取中位数。
 
 | N | 模式 | v6 D=128 | PyTorch SDPA | v6 latency / SDPA latency |
 |---:|---|---:|---:|---:|
@@ -443,7 +444,34 @@ ptxas/NCU 资源结果：
 | Achieved occupancy（NCU full） | 15.98% | - |
 | Spill stores/loads | 0 / 0 | 0 / 0 |
 
-原因是 shared memory 已经限制每 SM 只能放 2 个 block；causal 的 163 registers/thread 又显著压缩了寄存器余量。v6 当前定位是“正确的 D=128 结构原型”，下一次优化应围绕减小 `o_acc` 生命周期、降低 PV 输出 tile 的寄存器占用，或重新设计 `Bq`，而不是盲目继续加 unroll。
+v6 的静态 shared memory 限制了每 SM 可驻留的 block 数，causal 路径使用 163 个寄存器每线程。
+
+### D128 tile 优化
+
+新路径复用 v8 的 Tensor Core fragment 和 online softmax，将 Q/KV tile 改为
+32×32。16 B `cp.async` 配合 padded shared-memory stride 与 `ldmatrix`。
+sm_86 编译产物的静态 shared memory 从 **49,536 B 降至 17,408 B**，两条路径
+的 local memory 和 stack 均为 0。自动入口在 sm_80+ 对齐输入上启用新路径，
+未对齐输入及较旧架构走 v6。
+
+下表为 RTX 3060 Laptop、FP16 `[2,2,N,128]` 的 12 轮 CUDA Event 中位数，单位 ms。
+
+| N | 模式 | v6 | D128 32×32 | PyTorch Flash SDPA | v6 / D128 |
+|---:|---|---:|---:|---:|---:|
+| 31 | full | 0.0219 | 0.0118 | 0.0200 | 1.85× |
+| 31 | causal | 0.0219 | 0.0125 | 0.0225 | 1.76× |
+| 128 | full | 0.0408 | 0.0190 | 0.0236 | 2.15× |
+| 128 | causal | 0.0394 | 0.0178 | 0.0229 | 2.22× |
+| 1024 | full | 0.6313 | 0.1787 | 0.1776 | 3.53× |
+| 1024 | causal | 0.3400 | 0.1150 | 0.1038 | 2.96× |
+| 4096 | full | 7.4888 | 2.7952 | 2.0510 | 2.68× |
+| 4096 | causal | 3.9652 | 1.6626 | 1.0530 | 2.38× |
+
+```bash
+python bench_flashattention_d128.py --output benchmark_results/flashattention_d128_local.json
+```
+
+[逐轮样本与环境](benchmark_results/flashattention_d128_sm86.json)
 
 ### 长序列性能：v3 vs v4 vs v5
 
@@ -539,7 +567,7 @@ torch_ext/
 │   ├── flashattention_v7_cuda.cu   # FlashAttention v7，Q fragment 寄存器缓存
 │   ├── flashattention_v8_cuda.cu   # FlashAttention v8，cp.async + ldmatrix
 │   ├── flashattention_v9_cuda.cu   # FlashAttention v9，部分 K/V 双缓冲
-│   └── flashattention_dispatch.cpp # 稳定入口：D64路由v8，D128路由v6
+│   └── flashattention_dispatch.cpp # 稳定入口：D64 和 D128 分发
 ├── setup.py                   # CUDAExtension 单模块构建
 ├── build_and_test.sh          # 环境预检 + Ninja 增量编译 + 完整正确性测试
 ├── test_all.py                # 全量正确性、边界与 CUDA stream 契约测试
@@ -551,7 +579,7 @@ torch_ext/
 ├── bench_avg.py               # 兼容旧入口，转到 bench_ops.py
 ├── bench_flashattention.py    # v3/v4/v5 交错、轮换顺序 benchmark
 ├── bench_flashattention_bhd.py # v5 BHD vs 逐 head dispatch vs PyTorch SDPA
-├── bench_flashattention_d128.py # v6 D=128 vs PyTorch SDPA
+├── bench_flashattention_d128.py # D128 tile、v6、PyTorch Flash SDPA 对照
 ├── bench_flashattention_v7.py # 固定 B/H/D，扫描 N 对比 v5/v7
 ├── bench_flashattention_v7_bh.py # 固定 N/D，扫描 B×H 并行度
 ├── bench_flashattention_v8.py # v7/v8 数据通路受控对照
