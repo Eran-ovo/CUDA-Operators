@@ -398,6 +398,26 @@ for causal in (False, True):
     )
 
 # ---------------- PyTorch CUDA stream / 输入契约回归 ----------------
+for length in (1, 31, 32, 33, 129):
+    for shape in ((length, 128), (2, 2, length, 128)):
+        with torch.cuda.stream(packed_stream):
+            query = torch.randn(shape, device=device, dtype=torch.float16)
+            key, value = torch.randn_like(query), torch.randn_like(query)
+            for causal in (False, True):
+                expected = F.scaled_dot_product_attention(query, key, value, is_causal=causal)
+                actual = ai_infra_ops.flashattention_d128(query, key, value, causal)
+                torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3)
+                auto = ai_infra_ops.flashattention_auto(query, key, value, causal)
+                torch.testing.assert_close(auto, actual, atol=0, rtol=0)
+packed_stream.synchronize()
+
+offset_input = torch.randn(1 + 65 * 128, device=device, dtype=torch.float16)[1:].view(65, 128)
+torch.testing.assert_close(
+    ai_infra_ops.flashattention_auto(offset_input, offset_input, offset_input, True),
+    ai_infra_ops.flashattention_v6(offset_input, offset_input, offset_input, True),
+    atol=0, rtol=0,
+)
+
 # 输入生产、手写算子和 reference 全部排入同一条非默认 stream。若 wrapper
 # 错误地把 kernel 发往默认 stream，kernel 可能在输入尚未生成时就开始读取。
 test_stream = torch.cuda.Stream()

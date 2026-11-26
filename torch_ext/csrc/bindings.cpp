@@ -1,6 +1,7 @@
 // PyBind11 绑定：把 C++ forward 函数统一暴露给 Python
 #include <torch/extension.h>
 #include <pybind11/stl.h>
+#include "flashattention_d128.h"
 #include "ops.h"
 
 namespace py = pybind11;
@@ -39,6 +40,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("flashattention_v6", &flashattention_v6_forward,
           "FlashAttention v6 forward (CUDA, fp16 Tensor Core, D=128)",
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("causal") = false);
+    m.def("flashattention_d128", &flashattention_d128_forward,
+          "D128 FlashAttention forward (CUDA, cp.async + ldmatrix, 32 x 32 tiles)",
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("causal") = false);
     m.def("flashattention_v7", &flashattention_v7_forward,
           "FlashAttention v7 experiment (CUDA, D=64 register-cached Q fragments)",
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("causal") = false);
@@ -49,7 +53,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "FlashAttention v9 experiment (CUDA, partial K/V double buffering)",
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("causal") = false);
     m.def("flashattention_auto", &flashattention_auto_forward,
-          "Stable FlashAttention entry (CUDA, D64 v8 / D128 v6 dispatch)",
+          "Stable FlashAttention entry (CUDA, D64 v8 / D128 tiled async-copy dispatch)",
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("causal") = false);
     py::class_<FlashAttentionVarlenPlan>(m, "FlashAttentionVarlenPlan")
         .def(py::init<const std::vector<int64_t>&, c10::Device>(),

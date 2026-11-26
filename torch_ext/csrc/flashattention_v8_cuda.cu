@@ -41,15 +41,27 @@
 #define FLASHATTENTION_V8_FORWARD flashattention_v8_forward
 #endif
 
-namespace flashattention_v8 {
+#ifndef FLASHATTENTION_V8_NAMESPACE
+#define FLASHATTENTION_V8_NAMESPACE flashattention_v8
+#endif
 
+namespace FLASHATTENTION_V8_NAMESPACE {
+
+#ifdef FLASHATTENTION_V8_D128
+constexpr int D = 128;
+constexpr int BQ = 32;
+constexpr int BC = 32;
+#else
 constexpr int D = 64;
 constexpr int BQ = 64;
 constexpr int BC = 64;
+#endif
 constexpr int MMA_K = 16;
 constexpr int MMA_M = 16;
 constexpr int MMA_N = 8;
-constexpr int WARPS = 4;
+constexpr int WARPS = BQ / MMA_M;
+constexpr int SCORE_TILES = BC / MMA_N;
+constexpr int OUTPUT_TILES = D / MMA_N;
 constexpr int THREADS = WARPS * 32;
 
 // 每行有效数据仍为 64 half，尾部 8 half 只用于改变行跨度。
@@ -57,8 +69,8 @@ constexpr int THREADS = WARPS * 32;
 constexpr int SMEM_STRIDE = D + 8;
 constexpr int COPY_BYTES = 16;
 constexpr int COPY_HALFS = COPY_BYTES / sizeof(__half);  // 8 half
-constexpr int SEGMENTS_PER_ROW = D / COPY_HALFS;         // 8 segments
-constexpr int SEGMENTS_PER_TILE = BC * SEGMENTS_PER_ROW; // 512 segments
+constexpr int SEGMENTS_PER_ROW = D / COPY_HALFS;
+constexpr int SEGMENTS_PER_TILE = BC * SEGMENTS_PER_ROW;
 
 static_assert(D % MMA_K == 0, "D must be a multiple of mma K");
 static_assert(BC % MMA_K == 0, "BC must be a multiple of mma K");
@@ -105,7 +117,7 @@ __device__ __forceinline__ void cp_async_wait_all() {
 #endif
 }
 
-// 一个 CTA 合作搬运一个 64x64 tile。每个线程负责 4 个连续的 16B segment。
+// 一个 CTA 合作搬运一个 tile。每个线程按 16B segment 分工。
 // shared memory 的 padding 不参与 segment 编号，因此不会误写 padding 区域。
 __device__ __forceinline__ void copy_tile_async(
     const __half* src,
@@ -302,11 +314,11 @@ __global__ void FLASHATTENTION_V8_KERNEL(
 
     float running_max[2] = {-1e20f, -1e20f};
     float running_sum[2] = {0.0f, 0.0f};
-    float output_acc[2][8][4];
+    float output_acc[2][OUTPUT_TILES][4];
     #pragma unroll
     for (int row = 0; row < 2; ++row) {
         #pragma unroll
-        for (int tile = 0; tile < 8; ++tile) {
+        for (int tile = 0; tile < OUTPUT_TILES; ++tile) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 output_acc[row][tile][i] = 0.0f;
@@ -314,7 +326,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         }
     }
 
-    constexpr float SCALE = 0.125f;  // 1/sqrt(64)
+    constexpr float SCALE = D == 64 ? 0.125f : 0.08838834765f;
     const int q_last = min(q_offset + BQ - 1, N - 1);
     const int num_kv_tiles =
         IS_CAUSAL ? (q_last / BC + 1) : ((N + BC - 1) / BC);
@@ -344,9 +356,9 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         __syncthreads();
 #endif
 
-        float scores[8][4];
+        float scores[SCORE_TILES][4];
         #pragma unroll
-        for (int tile = 0; tile < 8; ++tile) {
+        for (int tile = 0; tile < SCORE_TILES; ++tile) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 scores[tile][i] = 0.0f;
@@ -358,7 +370,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         for (int d0 = 0; d0 < D; d0 += MMA_K) {
             const unsigned* a = q_frag[d0 / MMA_K];
             #pragma unroll
-            for (int tile = 0; tile < 8; ++tile) {
+            for (int tile = 0; tile < SCORE_TILES; ++tile) {
                 unsigned b0, b1;
                 load_k_as_b_fragment(
                     b0, b1, QK_tile, tile * MMA_N, d0, lane);
@@ -388,7 +400,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         // tail 与 causal mask 必须在 max/sum 之前应用。zero-fill 只保证
         // 越界 K 的点积为 0；若不改成 -inf，它仍会错误进入 softmax 分母。
         #pragma unroll
-        for (int tile = 0; tile < 8; ++tile) {
+        for (int tile = 0; tile < SCORE_TILES; ++tile) {
             const int key0 = key_offset + tile * MMA_N + group_col * 2;
             const int key1 = key0 + 1;
             const int query0 = q_offset + warp_row + group_row;
@@ -405,7 +417,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         }
 
         #pragma unroll
-        for (int tile = 0; tile < 8; ++tile) {
+        for (int tile = 0; tile < SCORE_TILES; ++tile) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 scores[tile][i] *= SCALE;
@@ -420,7 +432,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         float tile_max0 = -1e20f;
         float tile_max1 = -1e20f;
         #pragma unroll
-        for (int tile = 0; tile < 8; ++tile) {
+        for (int tile = 0; tile < SCORE_TILES; ++tile) {
             tile_max0 = fmaxf(
                 tile_max0, fmaxf(scores[tile][0], scores[tile][1]));
             tile_max1 = fmaxf(
@@ -443,7 +455,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         float tile_sum0 = 0.0f;
         float tile_sum1 = 0.0f;
         #pragma unroll
-        for (int tile = 0; tile < 8; ++tile) {
+        for (int tile = 0; tile < SCORE_TILES; ++tile) {
             scores[tile][0] = expf(scores[tile][0] - new_max0);
             scores[tile][1] = expf(scores[tile][1] - new_max0);
             scores[tile][2] = expf(scores[tile][2] - new_max1);
@@ -461,7 +473,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
 
         // online softmax 的 running max 改变后，旧输出必须乘 alpha。
         #pragma unroll
-        for (int tile = 0; tile < 8; ++tile) {
+        for (int tile = 0; tile < OUTPUT_TILES; ++tile) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 output_acc[0][tile][i] *= alpha0;
@@ -485,7 +497,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
                 scores[score_tile + 1][2], scores[score_tile + 1][3]);
 
             #pragma unroll
-            for (int tile = 0; tile < 8; ++tile) {
+            for (int tile = 0; tile < OUTPUT_TILES; ++tile) {
                 unsigned vb0, vb1;
 #ifdef FLASHATTENTION_V8_PARTIAL_PIPELINE
                 load_v_as_b_fragment(
@@ -522,7 +534,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
     }
 
     #pragma unroll
-    for (int tile = 0; tile < 8; ++tile) {
+    for (int tile = 0; tile < OUTPUT_TILES; ++tile) {
         const int output_col = tile * MMA_N;
         const int output_row0 = q_offset + warp_row + group_row;
         const int output_row1 = output_row0 + 8;
@@ -544,13 +556,13 @@ __global__ void FLASHATTENTION_V8_KERNEL(
     }
 }
 
-}  // namespace flashattention_v8
+}  // namespace FLASHATTENTION_V8_NAMESPACE
 
 torch::Tensor FLASHATTENTION_V8_FORWARD(torch::Tensor q,
                                         torch::Tensor k,
                                         torch::Tensor v,
                                         bool causal) {
-    using namespace flashattention_v8;
+    using namespace FLASHATTENTION_V8_NAMESPACE;
 
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(),
                 "q/k/v must be CUDA tensors");
@@ -559,7 +571,7 @@ torch::Tensor FLASHATTENTION_V8_FORWARD(torch::Tensor q,
                     v.dtype() == torch::kHalf,
                 "q/k/v must be float16");
     TORCH_CHECK(q.dim() == 2 || q.dim() == 4,
-                "q/k/v must be [N, 64] or [B, H, N, 64]");
+                "q/k/v must be [N, D] or [B, H, N, D]");
     TORCH_CHECK(k.dim() == q.dim() && v.dim() == q.dim(),
                 "q/k/v must have the same rank");
     TORCH_CHECK(q.sizes() == k.sizes() && q.sizes() == v.sizes(),
@@ -574,7 +586,7 @@ torch::Tensor FLASHATTENTION_V8_FORWARD(torch::Tensor q,
     const bool batched = q.dim() == 4;
     const int64_t n64 = batched ? q.size(2) : q.size(0);
     TORCH_CHECK(n64 > 0 && n64 <= INT_MAX, "N must be in [1, INT_MAX]");
-    TORCH_CHECK(q.size(-1) == D, "head dim must be 64");
+    TORCH_CHECK(q.size(-1) == D, "head dim must be ", D);
 
     int64_t batch_heads = 1;
     if (batched) {
@@ -593,6 +605,11 @@ torch::Tensor FLASHATTENTION_V8_FORWARD(torch::Tensor q,
         reinterpret_cast<std::uintptr_t>(q.data_ptr<at::Half>()) % 16 == 0 &&
         reinterpret_cast<std::uintptr_t>(k.data_ptr<at::Half>()) % 16 == 0 &&
         reinterpret_cast<std::uintptr_t>(v.data_ptr<at::Half>()) % 16 == 0;
+#ifdef FLASHATTENTION_V8_D128
+    if (!aligned || at::cuda::getCurrentDeviceProperties()->major < 8) {
+        return flashattention_v6_forward(q, k, v, causal);
+    }
+#else
     if (!aligned) {
         // 沿用引入 v8 之前 production dispatch 的保守边界：短序列使用 v5，
         // Q fragment 有足够复用机会的长序列使用 v7。这样 v8 的 fast path
@@ -603,6 +620,7 @@ torch::Tensor FLASHATTENTION_V8_FORWARD(torch::Tensor q,
         }
         return flashattention_v5_forward(q, k, v, causal);
     }
+#endif
 
     const int n = static_cast<int>(n64);
     auto output = torch::empty_like(q);
@@ -627,7 +645,7 @@ torch::Tensor FLASHATTENTION_V8_FORWARD(torch::Tensor q,
     return output;
 }
 
-#ifndef FLASHATTENTION_V8_PARTIAL_PIPELINE
+#if !defined(FLASHATTENTION_V8_PARTIAL_PIPELINE) && !defined(FLASHATTENTION_V8_D128)
 FlashAttentionVarlenPlan::FlashAttentionVarlenPlan(
     const std::vector<int64_t>& cu_seqlens, c10::Device device)
 {
@@ -660,7 +678,7 @@ FlashAttentionVarlenPlan::FlashAttentionVarlenPlan(
 torch::Tensor flashattention_varlen_forward(
     torch::Tensor q, torch::Tensor k, torch::Tensor v, const FlashAttentionVarlenPlan& plan)
 {
-    using namespace flashattention_v8;
+    using namespace FLASHATTENTION_V8_NAMESPACE;
     TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.sizes() == k.sizes(),
                 "expected q [T,Hq,64] and k/v [T,Hkv,64]");
     TORCH_CHECK(q.size(0) == plan.total_tokens && k.size(0) == plan.total_tokens &&
@@ -692,4 +710,5 @@ torch::Tensor flashattention_varlen_forward(
 #endif
 
 #undef FLASHATTENTION_V8_KERNEL
+#undef FLASHATTENTION_V8_NAMESPACE
 #undef FLASHATTENTION_V8_FORWARD

@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 
+#include "flashattention_d128.h"
 #include "ops.h"
 
 // FlashAttention 的 head dimension 会直接决定：
@@ -14,7 +15,7 @@ torch::Tensor flashattention_auto_forward(torch::Tensor q,
                                           torch::Tensor v,
                                           bool causal) {
     // 这里只检查调度真正需要的信息。dtype、device、contiguous、Q/K/V
-    // shape 一致性等完整契约仍由被选中的 v5/v6 wrapper 统一检查，避免维护
+    // shape 一致性等完整契约仍由被选中的 wrapper 统一检查，避免维护
     // 两份容易逐渐不一致的验证逻辑。
     TORCH_CHECK(q.dim() == 2 || q.dim() == 4,
                 "q/k/v must be [N, D] or [B, H, N, D]");
@@ -30,7 +31,7 @@ torch::Tensor flashattention_auto_forward(torch::Tensor q,
         return flashattention_v8_forward(q, k, v, causal);
     }
     if (head_dim == 128) {
-        return flashattention_v6_forward(q, k, v, causal);
+        return flashattention_d128_forward(q, k, v, causal);
     }
 
     // 暂不静默回退到 PyTorch：扩展内部返回 PyTorch 算子会让性能归因变得

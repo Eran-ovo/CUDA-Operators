@@ -14,7 +14,7 @@ import statistics
 import subprocess
 import sys
 from datetime import datetime
-from itertools import permutations
+from itertools import cycle, islice, permutations
 from pathlib import Path
 from typing import Callable
 
@@ -88,14 +88,9 @@ def balanced_orders(
     else:
         raise ValueError(f"unsupported implementation count: {count}")
 
-    if rounds % len(index_orders) != 0:
-        raise ValueError(
-            f"rounds={rounds} cannot evenly repeat {len(index_orders)} balanced orders"
-        )
     return [
         [implementations[index] for index in order]
-        for _ in range(rounds // len(index_orders))
-        for order in index_orders
+        for order in islice(cycle(index_orders), rounds)
     ]
 
 
@@ -354,7 +349,7 @@ def markdown_report(metadata: dict, rows: list[dict]) -> str:
         auto = find_row(rows, "flash_d128", case, mode, "auto")
         sdpa = find_row(rows, "flash_d128", case, mode, "sdpa")
         lines.append(
-            f"| {auto['shape']} | {mode} | v6 | {auto['median_ms']:.4f} | "
+            f"| {auto['shape']} | {mode} | auto | {auto['median_ms']:.4f} | "
             f"{sdpa['median_ms']:.4f} | "
             f"{sdpa['median_ms'] / auto['median_ms']:.2%} |"
         )

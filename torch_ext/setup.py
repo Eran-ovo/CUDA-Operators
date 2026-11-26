@@ -20,6 +20,7 @@ setup(
                 "csrc/flashattention_mma_cuda.cu",  # FlashAttention v4（fp16 Tensor Core）
                 "csrc/flashattention_v5_cuda.cu",   # FlashAttention v5（P fragment 寄存器直连）
                 "csrc/flashattention_v6_cuda.cu",   # FlashAttention v6（D=128 实验版）
+                "csrc/flashattention_d128_cuda.cu",  # D128（cp.async + ldmatrix）
                 "csrc/flashattention_v7_cuda.cu",   # FlashAttention v7（D=64 Q fragment 寄存器缓存）
                 "csrc/flashattention_v8_cuda.cu",   # FlashAttention v8（16B cp.async + ldmatrix 数据通路）
                 "csrc/flashattention_v9_cuda.cu",   # FlashAttention v9（K 单缓冲 + V 双缓冲流水）
