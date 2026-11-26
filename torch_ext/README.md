@@ -595,3 +595,17 @@ out = ai_infra_ops.flashattention_varlen(q, k, v, plan)
 ```bash
 python bench_flashattention_varlen.py --output benchmark_results/flashattention_varlen_local.json
 ```
+
+RTX 3060 Laptop（sm_86）、PyTorch 2.6.0+cu124、14 个 Q heads 和 2 个 KV heads。
+下表为 12 轮中位数，单位 ms。逐请求路径包含调用 SDPA 和拼接输出，
+packed 路径在计时前准备好元数据。
+
+| 各请求 token 数 | 逐请求 Flash SDPA | PyTorch packed | 自研 packed GQA | 逐请求 / 自研 |
+|---|---:|---:|---:|---:|
+| 1 + 17 + 65 + 128 | 0.1396 | 0.0230 | 0.0214 | 6.51× |
+| 128 + 512 + 1024 | 0.2301 | 0.1809 | 0.1937 | 1.19× |
+| 256 + 384 + 512 + 640 | 0.2153 | 0.1797 | 0.1396 | 1.54× |
+| 1024 + 2048 | 0.7135 | 0.6226 | 0.6983 | 1.02× |
+
+两种 packed 路径的相对优势随请求长度变化。最后一组相对逐请求的差距
+接近本次测量波动。原始样本和 Git 版本见 [sm_86 报告](benchmark_results/flashattention_varlen_sm86.json)。
