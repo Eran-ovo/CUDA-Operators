@@ -12,6 +12,8 @@ Extension 实现 GEMM、FlashAttention、Softmax、LayerNorm、RMSNorm，并保�
 
 ## 项目亮点
 
+- 支持打包的 D=64 FP16 因果 GQA。输入按 token 排列，复用 v8 的 Tensor Core 数据通路，同一次 kernel launch 处理不同长度的请求，直接索引共享的 KV heads。使用方法见 [Packed GQA](torch_ext/README.md#packed-gqa)。
+
 - 手写 Tensor Core 数据通路：`cp.async`、`ldmatrix`、
   `mma.sync.m16n8k16`，FP16 输入、FP32 累加与输出。
 - 使用 Nsight Compute 将 GEMM 的 LDSM bank conflict 从 **5.03 亿降至 0**；

@@ -21,6 +21,7 @@
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 
@@ -111,7 +112,8 @@ __device__ __forceinline__ void copy_tile_async(
     __half (*dst)[SMEM_STRIDE],
     int row_offset,
     int valid_rows,
-    int tid)
+    int tid,
+    size_t row_stride)
 {
     #pragma unroll
     for (int segment = tid; segment < SEGMENTS_PER_TILE;
@@ -123,7 +125,7 @@ __device__ __forceinline__ void copy_tile_async(
 
         // 对无效行传入 src 本身作为合法占位地址；src_size=0 保证不读取它。
         const __half* src_segment =
-            valid ? src + static_cast<size_t>(global_row) * D + col : src;
+            valid ? src + static_cast<size_t>(global_row) * row_stride + col : src;
         cp_async_16_zfill(&dst[row][col], src_segment, valid);
     }
 }
@@ -225,13 +227,16 @@ __device__ __forceinline__ void load_v_as_b_fragment(
         b0, b1, &tile[key_row + addr_lane][output_col]);
 }
 
-template <bool IS_CAUSAL>
+template <bool IS_CAUSAL, bool PACKED = false>
 __global__ void FLASHATTENTION_V8_KERNEL(
     const __half* __restrict__ Q,
     const __half* __restrict__ K,
     const __half* __restrict__ V,
     __half* __restrict__ O,
-    int N)
+    int N,
+    int query_heads,
+    int kv_heads,
+    const int32_t* __restrict__ tiles)
 {
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;
@@ -239,15 +244,33 @@ __global__ void FLASHATTENTION_V8_KERNEL(
     const int group_row = lane / 4;
     const int group_col = lane % 4;
 
-    const int q_offset = blockIdx.x * BQ;
     const int warp_row = warp_id * MMA_M;
 
-    const size_t sequence_offset =
-        static_cast<size_t>(blockIdx.y) * static_cast<size_t>(N) * D;
-    Q += sequence_offset;
-    K += sequence_offset;
-    V += sequence_offset;
-    O += sequence_offset;
+    int q_offset = blockIdx.x * BQ;
+    size_t q_stride = D;
+    size_t kv_stride = D;
+    if constexpr (PACKED) {
+        // One x-block per real query tile and one y-block per query head.
+        // Q/O and K/V are token-major, with no expanded KV heads.
+        const int32_t* tile = tiles + static_cast<size_t>(blockIdx.x) * 3;
+        const size_t start = tile[0];
+        N = tile[1];
+        q_offset = tile[2];
+        q_stride = static_cast<size_t>(query_heads) * D;
+        kv_stride = static_cast<size_t>(kv_heads) * D;
+        const size_t q_base = start * q_stride + blockIdx.y * D;
+        const size_t kv_base = start * kv_stride + (blockIdx.y / (query_heads / kv_heads)) * D;
+        Q += q_base;
+        K += kv_base;
+        V += kv_base;
+        O += q_base;
+    } else {
+        const size_t base = static_cast<size_t>(blockIdx.y) * N * D;
+        Q += base;
+        K += base;
+        V += base;
+        O += base;
+    }
 
     // Q 缓存为寄存器 fragment 后，QK_tile 即可被每一轮 K tile 覆盖。
 #ifdef FLASHATTENTION_V8_PARTIAL_PIPELINE
@@ -263,7 +286,7 @@ __global__ void FLASHATTENTION_V8_KERNEL(
 #endif
 
     // Q 只搬一次。尾 Q block 中不存在的行由 cp.async zero-fill。
-    copy_tile_async(Q, QK_tile, q_offset, N, tid);
+    copy_tile_async(Q, QK_tile, q_offset, N, tid, q_stride);
     cp_async_commit();
     cp_async_wait_all();
     __syncthreads();
@@ -307,15 +330,15 @@ __global__ void FLASHATTENTION_V8_KERNEL(
 #ifdef FLASHATTENTION_V8_PARTIAL_PIPELINE
         if (kv == 0) {
             // 第一个 tile 在 Q fragment 初始化之后才首次装载 K/V。
-            copy_tile_async(K, QK_tile, key_offset, N, tid);
-            copy_tile_async(V, V_tile[v_read_stage], key_offset, N, tid);
+            copy_tile_async(K, QK_tile, key_offset, N, tid, kv_stride);
+            copy_tile_async(V, V_tile[v_read_stage], key_offset, N, tid, kv_stride);
             cp_async_commit();
             cp_async_wait_all();
             __syncthreads();
         }
 #else
-        copy_tile_async(K, QK_tile, key_offset, N, tid);
-        copy_tile_async(V, V_tile, key_offset, N, tid);
+        copy_tile_async(K, QK_tile, key_offset, N, tid, kv_stride);
+        copy_tile_async(V, V_tile, key_offset, N, tid, kv_stride);
         cp_async_commit();
         cp_async_wait_all();
         __syncthreads();
@@ -355,9 +378,9 @@ __global__ void FLASHATTENTION_V8_KERNEL(
             const int next_v_stage = v_read_stage ^ 1;
             // 这两组 copy 会与下面的 mask、softmax 和 PV 计算重叠：K 写入
             // 当前 QK_tile（QK 已经完成），V 写入未被当前 PV 使用的 stage。
-            copy_tile_async(K, QK_tile, next_key_offset, N, tid);
+            copy_tile_async(K, QK_tile, next_key_offset, N, tid, kv_stride);
             copy_tile_async(
-                V, V_tile[next_v_stage], next_key_offset, N, tid);
+                V, V_tile[next_v_stage], next_key_offset, N, tid, kv_stride);
             cp_async_commit();
         }
 #endif
@@ -507,15 +530,15 @@ __global__ void FLASHATTENTION_V8_KERNEL(
         const float inv_sum1 = 1.0f / running_sum[1];
 
         if (output_row0 < N) {
-            O[output_row0 * D + output_col + group_col * 2] =
+            O[output_row0 * q_stride + output_col + group_col * 2] =
                 __float2half(output_acc[0][tile][0] * inv_sum0);
-            O[output_row0 * D + output_col + group_col * 2 + 1] =
+            O[output_row0 * q_stride + output_col + group_col * 2 + 1] =
                 __float2half(output_acc[0][tile][1] * inv_sum0);
         }
         if (output_row1 < N) {
-            O[output_row1 * D + output_col + group_col * 2] =
+            O[output_row1 * q_stride + output_col + group_col * 2] =
                 __float2half(output_acc[1][tile][0] * inv_sum1);
-            O[output_row1 * D + output_col + group_col * 2 + 1] =
+            O[output_row1 * q_stride + output_col + group_col * 2 + 1] =
                 __float2half(output_acc[1][tile][1] * inv_sum1);
         }
     }
@@ -592,17 +615,81 @@ torch::Tensor FLASHATTENTION_V8_FORWARD(torch::Tensor q,
             reinterpret_cast<const __half*>(q.data_ptr<at::Half>()),
             reinterpret_cast<const __half*>(k.data_ptr<at::Half>()),
             reinterpret_cast<const __half*>(v.data_ptr<at::Half>()),
-            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), n);
+            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), n, 0, 0, nullptr);
     } else {
         FLASHATTENTION_V8_KERNEL<false><<<grid, THREADS, 0, stream>>>(
             reinterpret_cast<const __half*>(q.data_ptr<at::Half>()),
             reinterpret_cast<const __half*>(k.data_ptr<at::Half>()),
             reinterpret_cast<const __half*>(v.data_ptr<at::Half>()),
-            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), n);
+            reinterpret_cast<__half*>(output.data_ptr<at::Half>()), n, 0, 0, nullptr);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return output;
 }
+
+#ifndef FLASHATTENTION_V8_PARTIAL_PIPELINE
+FlashAttentionVarlenPlan::FlashAttentionVarlenPlan(
+    const std::vector<int64_t>& cu_seqlens, c10::Device device)
+{
+    using flashattention_v8::BQ;
+    TORCH_CHECK(device.is_cuda(), "varlen plan requires a CUDA device");
+    TORCH_CHECK(cu_seqlens.size() >= 2 && cu_seqlens.front() == 0,
+                "cu_seqlens must start at zero and contain at least one sequence");
+    TORCH_CHECK(cu_seqlens.back() > 0 && cu_seqlens.back() <= INT_MAX,
+                "the packed token count must be in [1, INT_MAX]");
+    total_tokens = cu_seqlens.back();
+
+    std::vector<int32_t> entries;
+    for (size_t i = 1; i < cu_seqlens.size(); ++i) {
+        const int64_t start = cu_seqlens[i - 1];
+        const int64_t end = cu_seqlens[i];
+        TORCH_CHECK(end > start && end <= total_tokens,
+                    "cu_seqlens must be strictly increasing");
+        const int64_t length = end - start;
+        for (int64_t offset = 0; offset < length; offset += BQ) {
+            entries.insert(entries.end(), {
+                static_cast<int32_t>(start), static_cast<int32_t>(length),
+                static_cast<int32_t>(offset),
+            });
+        }
+    }
+    tiles = torch::tensor(entries, torch::TensorOptions().dtype(torch::kInt32))
+                .view({-1, 3}).to(device);
+}
+
+torch::Tensor flashattention_varlen_forward(
+    torch::Tensor q, torch::Tensor k, torch::Tensor v, const FlashAttentionVarlenPlan& plan)
+{
+    using namespace flashattention_v8;
+    TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.sizes() == k.sizes(),
+                "expected q [T,Hq,64] and k/v [T,Hkv,64]");
+    TORCH_CHECK(q.size(0) == plan.total_tokens && k.size(0) == plan.total_tokens &&
+                q.size(2) == D && k.size(2) == D, "packed token count or head dimension mismatch");
+    TORCH_CHECK(k.size(1) > 0 && q.size(1) > 0 && q.size(1) <= 65535 &&
+                q.size(1) % k.size(1) == 0, "Hq must be a positive multiple of Hkv");
+    for (const auto& tensor : {q, k, v}) {
+        TORCH_CHECK(tensor.device() == plan.tiles.device() && tensor.scalar_type() == torch::kHalf &&
+                    tensor.is_contiguous(), "packed inputs must be contiguous FP16 on the plan device");
+        TORCH_CHECK(reinterpret_cast<std::uintptr_t>(tensor.data_ptr()) % COPY_BYTES == 0,
+                    "packed inputs must be 16-byte aligned");
+    }
+    c10::cuda::CUDAGuard guard(q.device());
+    auto out = torch::empty_like(q);
+    const dim3 grid(static_cast<unsigned>(plan.tiles.size(0)), static_cast<unsigned>(q.size(1)));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    // The plan can be released while its kernel is queued on a different stream.
+    c10::cuda::CUDACachingAllocator::recordStream(plan.tiles.storage().data_ptr(), stream);
+    FLASHATTENTION_V8_KERNEL<true, true><<<grid, THREADS, 0, stream.stream()>>>(
+        reinterpret_cast<const __half*>(q.data_ptr<at::Half>()),
+        reinterpret_cast<const __half*>(k.data_ptr<at::Half>()),
+        reinterpret_cast<const __half*>(v.data_ptr<at::Half>()),
+        reinterpret_cast<__half*>(out.data_ptr<at::Half>()),
+        0, static_cast<int>(q.size(1)), static_cast<int>(k.size(1)),
+        plan.tiles.data_ptr<int32_t>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+#endif
 
 #undef FLASHATTENTION_V8_KERNEL
 #undef FLASHATTENTION_V8_FORWARD

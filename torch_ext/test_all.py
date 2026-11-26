@@ -321,6 +321,59 @@ for causal in (False, True):
         2e-2,
     )
 
+# ---------------- Packed D=64 causal GQA ----------------
+def check_packed_attention(lengths, query_heads, kv_heads, stream):
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    plan = ai_infra_ops.FlashAttentionVarlenPlan(offsets, torch.device(device))
+    with torch.cuda.stream(stream):
+        q = torch.randn(offsets[-1], query_heads, 64, device=device, dtype=torch.float16)
+        k = torch.randn(offsets[-1], kv_heads, 64, device=device, dtype=torch.float16)
+        v = torch.randn_like(k)
+        out = ai_infra_ops.flashattention_varlen(q, k, v, plan)
+        del plan
+        ref = torch.cat([
+            F.scaled_dot_product_attention(
+                qs.transpose(0, 1).float(), ks.transpose(0, 1).float(), vs.transpose(0, 1).float(),
+                is_causal=True, enable_gqa=True,
+            ).transpose(0, 1)
+            for qs, ks, vs in zip(q.split(lengths), k.split(lengths), v.split(lengths), strict=True)
+        ])
+    stream.synchronize()
+    check(f"Packed D64 {lengths} {query_heads}:{kv_heads}", out.float(), ref, 2e-3)
+
+
+packed_stream = torch.cuda.Stream()
+check_packed_attention((1, 17, 63, 64, 65, 129), 14, 2, packed_stream)
+check_packed_attention((128, 512, 1024), 14, 2, packed_stream)
+check_packed_attention((65,), 2, 2, packed_stream)
+check_packed_attention((9, 67), 8, 1, packed_stream)
+
+for offsets in ([], [1, 2], [0, 3, 3], [0, 5, 4]):
+    try:
+        ai_infra_ops.FlashAttentionVarlenPlan(offsets, torch.device(device))
+    except RuntimeError as error:
+        assert "cu_seqlens" in str(error)
+    else:
+        raise AssertionError(f"expected invalid offsets to be rejected: {offsets}")
+plan = ai_infra_ops.FlashAttentionVarlenPlan([0, 3], torch.device(device))
+for q, k, expected in (
+    (torch.empty(4, 4, 64, device=device, dtype=torch.float16),
+     torch.empty(4, 2, 64, device=device, dtype=torch.float16), "token count"),
+    (torch.empty(3, 3, 64, device=device, dtype=torch.float16),
+     torch.empty(3, 2, 64, device=device, dtype=torch.float16), "multiple"),
+    (torch.empty(3 * 4 * 64 + 1, device=device, dtype=torch.float16)[1:].view(3, 4, 64),
+     torch.empty(3, 2, 64, device=device, dtype=torch.float16), "aligned"),
+):
+    try:
+        ai_infra_ops.flashattention_varlen(q, k, k, plan)
+    except RuntimeError as error:
+        assert expected in str(error)
+    else:
+        raise AssertionError(f"expected incompatible input to be rejected: {expected}")
+
+
 # ---------------- FlashAttention v6 D=128 ----------------
 # D=128 会把 Q/K/V 的 shared-memory stride 和 PV 输出 tile 数都翻倍。
 B6, H6, N6, D6 = 2, 2, 65, 128

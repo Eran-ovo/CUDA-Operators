@@ -1,5 +1,6 @@
 #pragma once
 #include <torch/extension.h>
+#include <vector>
 
 // 所有算子的 Python 侧入口函数声明，bindings.cpp 和各自 .cu 共同引用
 torch::Tensor rmsnorm_forward(torch::Tensor x, torch::Tensor g, double eps);
@@ -23,3 +24,18 @@ torch::Tensor flashattention_v7_forward(torch::Tensor q, torch::Tensor k, torch:
 torch::Tensor flashattention_v8_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
 torch::Tensor flashattention_v9_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
 torch::Tensor flashattention_auto_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);
+
+class FlashAttentionVarlenPlan {
+public:
+    FlashAttentionVarlenPlan(const std::vector<int64_t>& cu_seqlens, c10::Device device);
+
+private:
+    int64_t total_tokens;
+    torch::Tensor tiles;
+
+    friend torch::Tensor flashattention_varlen_forward(
+        torch::Tensor q, torch::Tensor k, torch::Tensor v, const FlashAttentionVarlenPlan& plan);
+};
+
+torch::Tensor flashattention_varlen_forward(
+    torch::Tensor q, torch::Tensor k, torch::Tensor v, const FlashAttentionVarlenPlan& plan);

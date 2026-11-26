@@ -1,6 +1,6 @@
 # torch_ext：把手写 CUDA kernel 封装成 PyTorch 算子
 
-把 `kernels/` 下 5 类手写 CUDA kernel（GEMM / Softmax / LayerNorm / RMSNorm / FlashAttention）统一封装成一个 PyTorch Extension 模块 `ai_infra_ops`。当前暴露 20 个手写算子/调度入口，以及 1 个只用于公平测速的 cuBLAS 基线入口。
+把 `kernels/` 下 5 类手写 CUDA kernel（GEMM / Softmax / LayerNorm / RMSNorm / FlashAttention）统一封装成一个 PyTorch Extension 模块 `ai_infra_ops`。模块提供手写算子、自动分发、变长 GQA 和用于公平测速的 cuBLAS 基线入口。
 
 ## 环境
 
@@ -568,3 +568,30 @@ torch_ext/
 5. **运行时 bool → 编译期模板**：FlashAttention 的 causal 是运行时 bool，在包装层 `if/else` 派发到 `flash_fwd<true>` / `flash_fwd<false>` 两个编译期实例，消除 kernel 内每轮循环的运行时分支
 6. **ABI 一致**：setup.py 编译时 torch 自动对齐 `_GLIBCXX_USE_CXX11_ABI`
 7. **TORCH_CUDA_ARCH_LIST**：指定 sm_86，避免对所有架构编译浪费时间
+## Packed GQA
+
+`flashattention_varlen` 计算 D=64 FP16 因果 self-attention，接收连续 CUDA 张量
+`Q[T,Hq,64]`、`K/V[T,Hkv,64]`，其中 `Hq` 是 `Hkv` 的整数倍。
+`FlashAttentionVarlenPlan` 从 CPU 端的累计 token 偏移生成 GPU tile 表。
+偏移从 0 开始，严格递增，末尾等于 `T`。各请求只访问自己的 KV，输出布局与 Q 相同。
+同一批各层复用一个 plan，使用 CUDA Graph 时在捕获前创建它。
+
+```python
+import torch
+import ai_infra_ops
+
+device = torch.device("cuda")
+q = torch.randn(193, 14, 64, device=device, dtype=torch.float16)
+k = torch.randn(193, 2, 64, device=device, dtype=torch.float16)
+v = torch.randn_like(k)
+plan = ai_infra_ops.FlashAttentionVarlenPlan([0, 65, 193], q.device)
+out = ai_infra_ops.flashattention_varlen(q, k, v, plan)
+```
+
+在 `torch_ext` 目录运行 `python test_all.py` 验证变长边界、14:2 GQA、MQA 和非默认流。
+以下基准比较逐请求 Flash SDPA、PyTorch packed Flash Attention 和自研入口，
+固定请求边界与 FP16 输入，使用 CUDA Event 与 12 轮平衡顺序。计时前构造 plan。
+
+```bash
+python bench_flashattention_varlen.py --output benchmark_results/flashattention_varlen_local.json
+```

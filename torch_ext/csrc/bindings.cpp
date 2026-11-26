@@ -1,5 +1,6 @@
 // PyBind11 绑定：把 C++ forward 函数统一暴露给 Python
 #include <torch/extension.h>
+#include <pybind11/stl.h>
 #include "ops.h"
 
 namespace py = pybind11;
@@ -50,4 +51,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("flashattention_auto", &flashattention_auto_forward,
           "Stable FlashAttention entry (CUDA, D64 v8 / D128 v6 dispatch)",
           py::arg("q"), py::arg("k"), py::arg("v"), py::arg("causal") = false);
+    py::class_<FlashAttentionVarlenPlan>(m, "FlashAttentionVarlenPlan")
+        .def(py::init<const std::vector<int64_t>&, c10::Device>(),
+             py::arg("cu_seqlens"), py::arg("device"));
+    m.def("flashattention_varlen", &flashattention_varlen_forward,
+          "Causal FP16 D=64 attention for packed [T,H,D] inputs with native GQA",
+          py::arg("q"), py::arg("k"), py::arg("v"), py::arg("plan"));
 }
